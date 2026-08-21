@@ -87,7 +87,7 @@ struct ShapingState: Equatable {
 final class ShapingModel: ObservableObject {
     @Published var state = ShapingState.load()
     @Published var busy = false
-    @Published var throughput = "↓ …   ↑ …"
+    @Published var throughput = "Speed: …"
 
     private var sampler: Timer?
     private var lastSample: (time: Date, rx: UInt64, tx: UInt64)?
@@ -104,7 +104,7 @@ final class ShapingModel: ObservableObject {
         if let counters = Self.readInterfaceCounters() {
             lastSample = (Date(), counters.rx, counters.tx)
         }
-        throughput = "↓ …   ↑ …"
+        throughput = "Speed: …"
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.sampleTick() }
         }
@@ -127,10 +127,8 @@ final class ShapingModel: ObservableObject {
         guard dt > 0.2 else { return }
         // A 32-bit interface counter can wrap; a shrinking total reads as 0.
         let rx = counters.rx >= last.rx ? counters.rx - last.rx : 0
-        let tx = counters.tx >= last.tx ? counters.tx - last.tx : 0
         let down = Int(Double(rx) * 8 / dt)
-        let up = Int(Double(tx) * 8 / dt)
-        throughput = "↓ \(Self.speedText(down))   ↑ \(Self.speedText(up))"
+        throughput = "Speed: \(Self.speedText(down))"
     }
 
     nonisolated static func readInterfaceCounters() -> (rx: UInt64, tx: UInt64)? {
