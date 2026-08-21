@@ -145,25 +145,16 @@ final class ShapingModel: ObservableObject {
         switch values["DOWN_STATE"] {
         case "ok":
             let measured = Int(values["DOWN_BPS_MEASURED"] ?? "") ?? 0
-            var line = "Download: \(speedText(measured))"
+            var line = "Speed: \(speedText(measured))"
             if let cap = Int(values["CAP_DOWN_BPS"] ?? ""), cap > 0 {
                 line += " (limit \(speedText(cap)))"
             }
             lines.append(line)
         case "failed":
-            lines.append("Download: did not complete")
-        case "skipped-scoped":
-            lines.append("Download: not measured (shaping is limited to chosen hosts)")
+            lines.append("Speed: could not be measured")
         default:
-            break
+            lines.append("Speed: not measured (shaping is limited to chosen hosts)")
         }
-        if let rtt = Double(values["RTT_MS"] ?? "") {
-            lines.append("Ping: \(Int(rtt.rounded())) ms")
-        } else {
-            lines.append("Ping: no replies")
-        }
-        let loss = Double(values["LOSS_PCT"] ?? "") ?? 0
-        lines.append("Packet loss: " + (loss < 0.05 ? "none" : "\(ShapingState.percent(loss.rounded()))%"))
 
         if values["VERDICT"] == "warn" {
             lines.append("")
