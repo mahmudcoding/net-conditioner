@@ -3,8 +3,8 @@
 **[Русская версия → README.md](README.md)**
 
 A macOS menu-bar app that limits internet speed, adds latency, and drops
-packets — so you can see how any app or site behaves on a bad connection.
-One click turns an "EDGE" profile on, one click turns it off.
+packets — so you can see how any app or site behaves on a slow connection.
+One click caps the speed, one click turns it off.
 
 Unlike browser DevTools throttling, the shaping works at the system level:
 it affects **all** programs and **all** protocols, including UDP — video
