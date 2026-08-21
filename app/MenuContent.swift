@@ -45,6 +45,11 @@ struct MenuContent: View {
             row("Turn Off") { model.turnOff() }
                 .disabled(!model.state.active)
             Divider().padding(.vertical, 4)
+            if model.passwordFree {
+                row("Disable Password-Free Switching…") { model.setPasswordFree(false) }
+            } else {
+                row("Enable Password-Free Switching…") { model.setPasswordFree(true) }
+            }
             row("Check for Updates…") { updaterController.checkForUpdates(nil) }
             row("Quit Net Conditioner") { NSApplication.shared.terminate(nil) }
         }

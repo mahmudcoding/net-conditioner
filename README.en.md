@@ -33,6 +33,12 @@ of seconds and stops after a few updates (the result is cached for two
 minutes). "Turn Off" restores normal networking, and "Custom…" covers
 latency, packet loss, and asymmetric limits.
 
+Tired of password prompts? "Enable Password-Free Switching…" in the menu:
+one final administrator password installs the narrow rule
+`/etc/sudoers.d/netcond-tools` (covering only `dnctl` and `pfctl`), after
+which switching is instant and silent. The tradeoff: any local process can
+then change shaping without a password too. Disable it from the same menu.
+
 The menu speeds are round tiers that cap the internet in both directions at
 once: **100 kbit/s · 250 kbit/s · 500 kbit/s · 1 Mbit/s · 2 Mbit/s ·
 5 Mbit/s · 10 Mbit/s · 25 Mbit/s · 50 Mbit/s**.
