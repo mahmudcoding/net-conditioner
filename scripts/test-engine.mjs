@@ -159,6 +159,17 @@ console.log('validation')
   })())
 }
 
+console.log('verify porcelain (loopback only)')
+{
+  const r = run('verify', '--target', '127.0.0.1', '--probes', '5',
+    '--download-url', 'http://127.0.0.1:9/unreachable', '--porcelain')
+  check('exits 0 with no shaping', r.status === 0, r.stderr)
+  check('reports baseline verdict', r.stdout.includes('VERDICT=baseline'))
+  check('reports machine-readable keys',
+    ['ACTIVE=0', 'LOSS_PCT=', 'RTT_MS=', 'DOWN_STATE=', 'WARNINGS='].every((k) => r.stdout.includes(k)))
+  check('no prose mixed in', !r.stdout.includes('verify:'))
+}
+
 console.log('status without state')
 {
   const r = run('status', '--porcelain')

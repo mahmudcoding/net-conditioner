@@ -116,14 +116,71 @@ final class ShapingModel: ObservableObject {
         guard !busy else { return }
         busy = true
         Task.detached(priority: .userInitiated) {
-            let output: String
-            do { output = try runEngine(["verify", "--probes", "30"]) }
-            catch { output = "The connection check failed to run: \(error.localizedDescription)" }
+            let text: String
+            do {
+                let output = try runEngine(["verify", "--probes", "30", "--porcelain"])
+                text = Self.verifySummary(output)
+            } catch {
+                text = "The connection check failed to run: \(error.localizedDescription)"
+            }
             await MainActor.run {
                 self.busy = false
-                Self.alert(title: "Connection Check", text: output)
+                Self.alert(title: "Connection Check", text: text)
             }
         }
+    }
+
+    /// Turns the engine's KEY=VALUE verify report into a few plain lines.
+    static func verifySummary(_ porcelain: String) -> String {
+        var values: [String: String] = [:]
+        for line in porcelain.split(separator: "\n") {
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            values[String(line[..<separator])] = String(line[line.index(after: separator)...])
+        }
+        guard values["VERDICT"] != nil else {
+            return porcelain.isEmpty ? "The connection check produced no result." : porcelain
+        }
+
+        var lines: [String] = []
+        switch values["DOWN_STATE"] {
+        case "ok":
+            let measured = Int(values["DOWN_BPS_MEASURED"] ?? "") ?? 0
+            var line = "Download: \(speedText(measured))"
+            if let cap = Int(values["CAP_DOWN_BPS"] ?? ""), cap > 0 {
+                line += " (limit \(speedText(cap)))"
+            }
+            lines.append(line)
+        case "failed":
+            lines.append("Download: did not complete")
+        case "skipped-scoped":
+            lines.append("Download: not measured (shaping is limited to chosen hosts)")
+        default:
+            break
+        }
+        if let rtt = Double(values["RTT_MS"] ?? "") {
+            lines.append("Ping: \(Int(rtt.rounded())) ms")
+        } else {
+            lines.append("Ping: no replies")
+        }
+        let loss = Double(values["LOSS_PCT"] ?? "") ?? 0
+        lines.append("Packet loss: " + (loss < 0.05 ? "none" : "\(ShapingState.percent(loss.rounded()))%"))
+
+        lines.append("")
+        switch values["VERDICT"] {
+        case "baseline":
+            lines.append("Shaping is off — this is your normal connection.")
+        case "ok":
+            lines.append("Shaping is working as configured.")
+        default:
+            lines.append("Shaping may not be working: \(values["WARNINGS"] ?? "measurements don't match the configured shape").")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    static func speedText(_ bps: Int) -> String {
+        if bps >= 10_000_000 { return "\(Int((Double(bps) / 1_000_000).rounded())) Mbit/s" }
+        if bps >= 1_000_000 { return String(format: "%.1f Mbit/s", Double(bps) / 1_000_000) }
+        return "\(Int((Double(bps) / 1_000).rounded())) kbit/s"
     }
 
     static func alert(title: String, text: String) {

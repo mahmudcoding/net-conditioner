@@ -437,18 +437,17 @@ cmd_verify() {
   local warns=""
   add_warn() { warns="${warns:+$warns; }$1"; }
 
-  say "verify: pinging $target ($PROBES probes)..."
-  local summary loss avg
+  [ "$PORCELAIN" = 1 ] || say "verify: pinging $target ($PROBES probes)..."
+  local summary loss avg expected_loss=""
   summary=$(ping_summary "$target" "$PROBES")
   loss=${summary%% *}
   avg=${summary#* }
-  say "  measured: loss ${loss}%${avg:+, avg RTT ${avg} ms}"
+  [ "$PORCELAIN" = 1 ] || say "  measured: loss ${loss}%${avg:+, avg RTT ${avg} ms}"
 
   if [ "$active" = "1" ]; then
-    local expected_loss
     expected_loss=$(awk -v u="$loss_up" -v d="$loss_down" 'BEGIN {
       printf "%.1f", (1 - (1 - u / 100) * (1 - d / 100)) * 100 }')
-    say "  expected: round-trip loss ~${expected_loss}%, added RTT ${rtt_ms} ms"
+    [ "$PORCELAIN" = 1 ] || say "  expected: round-trip loss ~${expected_loss}%, added RTT ${rtt_ms} ms"
     awk -v m="$loss" -v e="$expected_loss" 'BEGIN {
       exit !(m < e / 2 - 1 || m > e * 2 + 5) }' \
       && add_warn "measured loss ${loss}% is far from the configured ~${expected_loss}%"
@@ -458,10 +457,11 @@ cmd_verify() {
     fi
   fi
 
-  local url=$DOWNLOAD_URL
+  local url=$DOWNLOAD_URL down_state="skipped" down_measured=""
   if [ -z "$url" ]; then
     if [ "$active" = "1" ] && [ -n "$hosts" ]; then
-      say "  download check skipped: shaping is scoped to '$hosts' — pass --download-url with a URL on a scoped host to measure it"
+      [ "$PORCELAIN" = 1 ] || say "  download check skipped: shaping is scoped to '$hosts' — pass --download-url with a URL on a scoped host to measure it"
+      down_state="skipped-scoped"
       url=""
     else
       local bytes
@@ -475,24 +475,47 @@ cmd_verify() {
   fi
 
   if [ -n "$url" ]; then
-    say "verify: downloading $url ..."
+    [ "$PORCELAIN" = 1 ] || say "verify: downloading $url ..."
     local metrics speed_bps http_code
     metrics=$(curl -sS -o /dev/null --max-time 60 -w '%{speed_download} %{http_code}' "$url" 2>/dev/null) || true
     speed_bps=$(awk -v s="${metrics%% *}" 'BEGIN { printf "%d", s * 8 }')
     http_code=${metrics##* }
     if [ "${http_code:-000}" = "200" ]; then
-      say "  measured: $(fmt_rate "$speed_bps")/s download"
+      down_state="ok"
+      down_measured=$speed_bps
+      [ "$PORCELAIN" = 1 ] || say "  measured: $(fmt_rate "$speed_bps")/s download"
       if [ "$active" = "1" ] && [ "$down_bps" != 0 ]; then
-        say "  expected: capped at $(fmt_rate "$down_bps")/s"
+        [ "$PORCELAIN" = 1 ] || say "  expected: capped at $(fmt_rate "$down_bps")/s"
         awk -v m="$speed_bps" -v c="$down_bps" 'BEGIN { exit !(m > c * 1.6) }' \
           && add_warn "download ran at $(fmt_rate "$speed_bps")/s despite the $(fmt_rate "$down_bps")/s cap — shaping may not be taking effect"
       fi
     else
-      say "  download did not complete (HTTP ${http_code:-none})"
+      down_state="failed"
+      [ "$PORCELAIN" = 1 ] || say "  download did not complete (HTTP ${http_code:-none})"
       if [ "$active" = "1" ] && is_zero "$loss_up" && is_zero "$loss_down"; then
         add_warn "download failed with no packet loss configured — check connectivity"
       fi
     fi
+  fi
+
+  if [ "$PORCELAIN" = 1 ]; then
+    local verdict="baseline"
+    if [ "$active" = "1" ]; then
+      if [ -n "$warns" ]; then verdict="warn"; else verdict="ok"; fi
+    fi
+    say "ACTIVE=$active"
+    say "TARGET=$target"
+    say "LOSS_PCT=$loss"
+    say "RTT_MS=$avg"
+    say "EXPECTED_LOSS_PCT=$expected_loss"
+    say "CONFIGURED_RTT_MS=$rtt_ms"
+    say "CAP_DOWN_BPS=$down_bps"
+    say "DOWN_STATE=$down_state"
+    say "DOWN_BPS_MEASURED=$down_measured"
+    say "WARNINGS=$warns"
+    say "VERDICT=$verdict"
+    [ -n "$warns" ] && return 1
+    return 0
   fi
 
   if [ -n "$warns" ]; then
@@ -581,6 +604,7 @@ case $COMMAND in
         --target) need_value "$1" "${2:-}"; VERIFY_TARGET=$2; shift 2 ;;
         --download-url) need_value "$1" "${2:-}"; DOWNLOAD_URL=$2; shift 2 ;;
         --probes) need_value "$1" "${2:-}"; PROBES=$2; shift 2 ;;
+        --porcelain) PORCELAIN=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) die "unknown option: $1" ;;
       esac
