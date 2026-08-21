@@ -83,71 +83,85 @@ struct ShapingState: Equatable {
     }
 }
 
+/// Counts bytes across the parallel measurement downloads.
+private final class ByteCounter: NSObject, URLSessionDataDelegate {
+    private let lock = NSLock()
+    private var total = 0
+
+    var snapshot: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return total
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        total += data.count
+        lock.unlock()
+    }
+}
+
 @MainActor
 final class ShapingModel: ObservableObject {
     @Published var state = ShapingState.load()
     @Published var busy = false
     @Published var throughput = "Speed: …"
 
-    private var sampler: Timer?
-    private var lastSample: (time: Date, rx: UInt64, tx: UInt64)?
+    private var measuring = false
+    private var lastMeasurement: (bps: Int, at: Date, key: String)?
 
     func refresh() { state = ShapingState.load() }
 
-    /// Live current-traffic readout for the menu, sampled from the network
-    /// interface counters once a second — no test downloads involved. The
-    /// timer runs in the .common run-loop modes so it keeps firing while the
-    /// menu is open (menu tracking blocks the default mode and the main
-    /// dispatch queue).
-    func startSampling() {
-        stopSampling()
-        if let counters = Self.readInterfaceCounters() {
-            lastSample = (Date(), counters.rx, counters.tx)
+    /// Fills the menu's Speed line with the connection's available bandwidth:
+    /// a ~3-second burst of parallel downloads over a fixed time window (so it
+    /// stays quick even under a heavy cap), cached for two minutes unless the
+    /// shaping state changed.
+    func refreshBandwidth() {
+        let key = "\(state.active)|\(state.preset)|\(state.appliedAt)"
+        if let last = lastMeasurement, last.key == key,
+           Date().timeIntervalSince(last.at) < 120 {
+            throughput = "Speed: \(Self.speedText(last.bps))"
+            return
         }
+        guard !measuring else { return }
+        measuring = true
         throughput = "Speed: …"
-        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sampleTick() }
+        Task.detached(priority: .userInitiated) {
+            let measured = await Self.measureBandwidth()
+            await MainActor.run {
+                self.measuring = false
+                if let measured {
+                    self.lastMeasurement = (measured, Date(), key)
+                    self.throughput = "Speed: \(Self.speedText(measured))"
+                } else {
+                    self.throughput = "Speed: —"
+                }
+            }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        sampler = timer
     }
 
-    func stopSampling() {
-        sampler?.invalidate()
-        sampler = nil
-        lastSample = nil
-    }
-
-    private func sampleTick() {
-        guard let counters = Self.readInterfaceCounters() else { return }
-        let now = Date()
-        defer { lastSample = (now, counters.rx, counters.tx) }
-        guard let last = lastSample else { return }
-        let dt = now.timeIntervalSince(last.time)
-        guard dt > 0.2 else { return }
-        // A 32-bit interface counter can wrap; a shrinking total reads as 0.
-        let rx = counters.rx >= last.rx ? counters.rx - last.rx : 0
-        let down = Int(Double(rx) * 8 / dt)
-        throughput = "Speed: \(Self.speedText(down))"
-    }
-
-    nonisolated static func readInterfaceCounters() -> (rx: UInt64, tx: UInt64)? {
-        var addrs: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&addrs) == 0 else { return nil }
-        defer { freeifaddrs(addrs) }
-        var rx: UInt64 = 0
-        var tx: UInt64 = 0
-        var pointer = addrs
-        while let entry = pointer {
-            let ifa = entry.pointee
-            pointer = ifa.ifa_next
-            guard let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_LINK) else { continue }
-            guard String(cString: ifa.ifa_name) != "lo0" else { continue }
-            guard let data = ifa.ifa_data?.assumingMemoryBound(to: if_data.self) else { continue }
-            rx &+= UInt64(data.pointee.ifi_ibytes)
-            tx &+= UInt64(data.pointee.ifi_obytes)
+    /// Sums bytes received by three parallel downloads during a 2.5-second
+    /// window after a short warm-up, fast.com style. Returns bits per second,
+    /// or nil when nothing arrived (offline, or shaping at 100% loss).
+    nonisolated static func measureBandwidth() async -> Int? {
+        guard let url = URL(string: "https://speed.cloudflare.com/__down?bytes=200000000") else {
+            return nil
         }
-        return (rx, tx)
+        let counter = ByteCounter()
+        let config = URLSessionConfiguration.ephemeral
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.timeoutIntervalForRequest = 10
+        let session = URLSession(configuration: config, delegate: counter, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        for _ in 0..<3 { session.dataTask(with: url).resume() }
+        try? await Task.sleep(nanoseconds: 750_000_000)
+        let startBytes = counter.snapshot
+        let startTime = Date()
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        let bytes = counter.snapshot - startBytes
+        let elapsed = Date().timeIntervalSince(startTime)
+        guard bytes > 0, elapsed > 0 else { return nil }
+        return Int(Double(bytes) * 8 / elapsed)
     }
 
     func applyPreset(_ name: String) { runOperation(["preset", name]) }

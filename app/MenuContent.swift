@@ -22,9 +22,8 @@ struct MenuContent: View {
         Text(model.state.summary)
             .onAppear {
                 model.refresh()
-                model.startSampling()
+                model.refreshBandwidth()
             }
-            .onDisappear { model.stopSampling() }
         Text(model.throughput)
         if model.state.active && !model.state.detail.isEmpty {
             Text(model.state.detail)
