@@ -34,13 +34,13 @@ console.log('bash syntax')
 execFileSync('bash', ['-n', engine])
 check('bash -n netcond', true)
 
-console.log('dry-run: preset edge')
+console.log('dry-run: preset 2mbit')
 {
-  const r = run('preset', 'edge', '--dry-run')
+  const r = run('preset', '2mbit', '--dry-run')
   check('exits 0', r.status === 0, r.stderr)
   const out = r.stdout
-  check('download pipe', out.includes('pipe 9101 config bw 240000bit/s delay 200 plr 0.00000 queue'))
-  check('upload pipe', out.includes('pipe 9102 config bw 200000bit/s delay 200 plr 0.00000 queue'))
+  check('download pipe', out.includes('pipe 9101 config bw 2000000bit/s delay 0 plr 0.00000 queue'))
+  check('upload pipe', out.includes('pipe 9102 config bw 2000000bit/s delay 0 plr 0.00000 queue'))
   check('anchor hooks appended to pf.conf payload',
     out.includes('dummynet-anchor "netcond"') && out.includes('anchor "netcond"'))
   check('inbound rule excludes loopback',
@@ -97,6 +97,15 @@ console.log('dry-run: fractional rate')
   check('2.5mbit parses to 2500000bit/s', r.stdout.includes('bw 2500000bit/s'))
 }
 
+console.log('dry-run: preset 250kbit')
+{
+  const r = run('preset', '250kbit', '--dry-run')
+  check('caps both directions at 250 kbit', (() => {
+    const dn = r.stdout.split('\n').filter((line) => line.includes('config bw'))
+    return dn.length === 2 && dn.every((line) => line.includes('bw 250000bit/s'))
+  })())
+}
+
 console.log('dry-run: off')
 {
   const r = run('off', '--dry-run')
@@ -116,9 +125,13 @@ console.log('validation')
     const r = run('set', '--dry-run')
     return r.status !== 0 && r.stderr.includes('nothing to shape')
   })())
-  check('unknown preset fails', (() => {
+  check('non-rate preset fails', (() => {
     const r = run('preset', 'nope', '--dry-run')
-    return r.status !== 0 && r.stderr.includes('unknown preset')
+    return r.status !== 0 && r.stderr.includes('invalid rate')
+  })())
+  check('preset without a speed fails', (() => {
+    const r = run('preset')
+    return r.status !== 0 && r.stderr.includes('requires a speed')
   })())
   check('bad rate unit fails', (() => {
     const r = run('set', '--down', '1MB', '--dry-run')

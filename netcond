@@ -31,33 +31,31 @@ die() { printf 'netcond: %s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-netcond — macOS network conditioner (bandwidth, latency, packet loss)
+netcond — macOS network conditioner (internet speed, latency, packet loss)
 
 Usage:
-  netcond preset <name> [--host <host>]... [--dry-run]
+  netcond preset <speed> [--host <host>]... [--dry-run]
   netcond set [--down <rate>] [--up <rate>] [--rtt <ms>] [--loss <pct>]
               [--loss-up <pct>] [--loss-down <pct>] [--host <host>]... [--dry-run]
   netcond status [--porcelain]
   netcond off [--dry-run]
   netcond verify [--target <host>] [--download-url <url>] [--probes <n>]
 
-Presets:
-  edge      240 kbit down / 200 kbit up / 400 ms RTT
-  3g        780 kbit down / 330 kbit up / 100 ms RTT
-  lte        50 mbit down /  10 mbit up /  50 ms RTT
-  dsl         2 mbit down / 256 kbit up /   5 ms RTT
-  very-bad    1 mbit down /   1 mbit up / 500 ms RTT / 10% loss both ways
-  loss-8      8% upload packet loss, no speed cap
-  loss-15    15% upload packet loss, no speed cap
-  blackout  100% packet loss both ways (full outage)
+A preset caps the internet speed in both directions at once:
+
+  netcond preset 2mbit
+
+Any rate works. Suggested tiers: 100kbit, 250kbit, 500kbit, 1mbit, 2mbit,
+5mbit, 10mbit, 25mbit, 50mbit.
 
 Rates are <number><unit> with unit bit|kbit|mbit|gbit (e.g. 500kbit, 2mbit,
-1.5mbit); leaving --down/--up out means unlimited. --rtt is the total round
-trip added, split across both directions. --loss applies both ways unless
---loss-up/--loss-down override a direction. --host limits shaping to traffic
-to/from those hosts (default: the whole machine; loopback is never shaped).
-Applying over an active shape replaces it. "netcond off" or a reboot restores
-normal networking. All commands except verify need administrator rights.
+1.5mbit). "set" gives independent control: leaving --down/--up out means
+unlimited, --rtt is the total round trip added (split across directions), and
+--loss applies both ways unless --loss-up/--loss-down override a direction.
+--host limits shaping to traffic to/from those hosts (default: the whole
+machine; loopback is never shaped). Applying over an active shape replaces it.
+"netcond off" or a reboot restores normal networking. All commands except
+verify need administrator rights.
 EOF
 }
 
@@ -519,24 +517,15 @@ need_value() {
   case $2 in --*) die "$1 requires a value" ;; esac
 }
 
-apply_preset() {
+apply_preset() { # any rate caps both directions at that speed
   PRESET=$1
-  case $1 in
-    edge)     DOWN_RATE=240kbit UP_RATE=200kbit RTT=400 ;;
-    3g)       DOWN_RATE=780kbit UP_RATE=330kbit RTT=100 ;;
-    lte)      DOWN_RATE=50mbit  UP_RATE=10mbit  RTT=50 ;;
-    dsl)      DOWN_RATE=2mbit   UP_RATE=256kbit RTT=5 ;;
-    very-bad) DOWN_RATE=1mbit   UP_RATE=1mbit   RTT=500 LOSS=10 ;;
-    loss-8)   LOSS_UP=8 ;;
-    loss-15)  LOSS_UP=15 ;;
-    blackout) LOSS=100 ;;
-    *) die "unknown preset '$1' — one of: edge, 3g, lte, dsl, very-bad, loss-8, loss-15, blackout" ;;
-  esac
+  DOWN_RATE=$1
+  UP_RATE=$1
 }
 
 case $COMMAND in
   preset)
-    [ $# -ge 1 ] || die "preset requires a name (see --help)"
+    [ $# -ge 1 ] || die "preset requires a speed, e.g. 2mbit (see --help)"
     apply_preset "$1"
     shift
     while [ $# -gt 0 ]; do

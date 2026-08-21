@@ -45,7 +45,14 @@ struct ShapingState: Equatable {
 
     var summary: String {
         guard active else { return "Shaping off" }
-        let name = preset.isEmpty ? "custom shape" : preset.uppercased()
+        let name: String
+        if !preset.isEmpty && downBps > 0 && downBps == upBps {
+            name = "\(Self.rate(downBps))/s"
+        } else if preset.isEmpty {
+            name = "custom shape"
+        } else {
+            name = preset
+        }
         let scope = hosts.isEmpty ? "" : " → \(hosts.joined(separator: ", "))"
         return "Active: \(name)\(scope)"
     }
@@ -53,8 +60,12 @@ struct ShapingState: Equatable {
     var detail: String {
         guard active else { return "" }
         var parts: [String] = []
-        if downBps > 0 { parts.append("\(Self.rate(downBps)) down") }
-        if upBps > 0 { parts.append("\(Self.rate(upBps)) up") }
+        if downBps > 0 && downBps == upBps {
+            // A symmetric cap is already the headline; don't repeat it here.
+        } else {
+            if downBps > 0 { parts.append("\(Self.rate(downBps)) down") }
+            if upBps > 0 { parts.append("\(Self.rate(upBps)) up") }
+        }
         if rttMs > 0 { parts.append("+\(rttMs) ms RTT") }
         if lossUpPct > 0 { parts.append("\(Self.percent(lossUpPct))% loss up") }
         if lossDownPct > 0 { parts.append("\(Self.percent(lossDownPct))% loss down") }

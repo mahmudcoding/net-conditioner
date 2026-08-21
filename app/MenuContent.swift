@@ -7,14 +7,15 @@ struct MenuContent: View {
     @Environment(\.openWindow) private var openWindow
 
     private static let presets: [(id: String, title: String)] = [
-        ("edge", "EDGE — 240 kbit, 400 ms"),
-        ("3g", "3G — 780 kbit, 100 ms"),
-        ("lte", "LTE — 50 Mbit, 50 ms"),
-        ("dsl", "DSL — 2 Mbit down, 256 kbit up"),
-        ("very-bad", "Very Bad — 1 Mbit, 500 ms, 10% loss"),
-        ("loss-8", "Packet Loss 8% (upload)"),
-        ("loss-15", "Packet Loss 15% (upload)"),
-        ("blackout", "Blackout — 100% loss"),
+        ("100kbit", "100 kbit/s"),
+        ("250kbit", "250 kbit/s"),
+        ("500kbit", "500 kbit/s"),
+        ("1mbit", "1 Mbit/s"),
+        ("2mbit", "2 Mbit/s"),
+        ("5mbit", "5 Mbit/s"),
+        ("10mbit", "10 Mbit/s"),
+        ("25mbit", "25 Mbit/s"),
+        ("50mbit", "50 Mbit/s"),
     ]
 
     var body: some View {

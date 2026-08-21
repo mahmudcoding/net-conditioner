@@ -24,35 +24,31 @@ Requirements: macOS 13+, Apple Silicon. The app updates itself (Sparkle):
 
 ## Use
 
-Click the speedometer → pick a profile → enter the administrator password
+Click the speedometer → pick a speed → enter the administrator password
 (the standard macOS dialog asks for it; the app never sees the password).
 While shaping is active the icon turns into a tortoise. "Turn Off" restores
-normal networking. "Custom…" takes exact numbers, and "Check Connection…"
-measures the actual speed, latency, and loss.
+normal networking. "Custom…" covers latency, packet loss, and asymmetric
+limits, and "Check Connection…" measures the actual speed, latency, and loss.
 
-| Profile | Down | Up | RTT | Loss |
-|---|---|---|---|---|
-| EDGE | 240 kbit | 200 kbit | 400 ms | — |
-| 3G | 780 kbit | 330 kbit | 100 ms | — |
-| LTE | 50 Mbit | 10 Mbit | 50 ms | — |
-| DSL | 2 Mbit | 256 kbit | 5 ms | — |
-| Very Bad | 1 Mbit | 1 Mbit | 500 ms | 10% both ways |
-| Packet Loss 8% | — | — | — | 8% upload |
-| Packet Loss 15% | — | — | — | 15% upload |
-| Blackout | — | — | — | 100% both ways |
+The menu speeds are round tiers that cap the internet in both directions at
+once: **100 kbit/s · 250 kbit/s · 500 kbit/s · 1 Mbit/s · 2 Mbit/s ·
+5 Mbit/s · 10 Mbit/s · 25 Mbit/s · 50 Mbit/s**.
 
 ## From the terminal
 
 The `netcond` script in this repository does everything the app does:
 
 ```bash
-./netcond preset 3g
+./netcond preset 2mbit
 ./netcond set --down 1mbit --up 256kbit --rtt 300 --loss 5
 ./netcond set --loss-up 8 --host example.com
 ./netcond status
 ./netcond verify
 ./netcond off
 ```
+
+`preset` takes any speed (`500kbit`, `2mbit`, `1.5mbit`) and caps both
+directions at once.
 
 `--host` limits shaping to traffic to/from specific hosts (default: the
 whole machine). `--dry-run` prints the commands without changing anything.
