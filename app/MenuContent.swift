@@ -23,11 +23,6 @@ struct MenuContent: View {
                 Text(model.state.summary)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(model.state.active ? Color.accentColor : .secondary)
-                if !model.throughput.isEmpty {
-                    Text(model.throughput)
-                        .font(.system(size: 12))
-                        .foregroundColor(.primary)
-                }
                 if model.state.active && !model.state.detail.isEmpty {
                     Text(model.state.detail)
                         .font(.system(size: 11))

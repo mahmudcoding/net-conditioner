@@ -29,11 +29,8 @@ Requirements: macOS 13+, Apple Silicon. The app updates itself (Sparkle):
 
 Click the speedometer → pick a speed → enter the administrator password
 (the standard macOS dialog asks for it; the app never sees the password).
-While shaping is active the icon turns into a tortoise. The top of the panel
-shows the connection's available speed: opening it starts a built-in
-measurement with parallel downloads that refreshes the number every couple
-of seconds and stops after a few updates (the result is cached for two
-minutes). "Turn Off" restores normal networking. Latency, packet loss, and
+While a limit is active the icon turns into a tortoise and the top of the
+panel shows the current limit. "Turn Off" restores normal networking. Latency, packet loss, and
 asymmetric limits are available from the terminal (`netcond set`).
 
 The administrator password is asked exactly once — on the very first
