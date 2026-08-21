@@ -83,10 +83,13 @@ struct ShapingState: Equatable {
     }
 }
 
-/// Counts bytes across the parallel measurement downloads.
+/// Counts bytes across the parallel measurement downloads and replaces any
+/// stream that finishes early, so per-request size limits never cap the test.
 private final class ByteCounter: NSObject, URLSessionDataDelegate {
     private let lock = NSLock()
     private var total = 0
+    private var stopped = false
+    var makeTask: (() -> URLSessionDataTask)?
 
     var snapshot: Int {
         lock.lock()
@@ -94,10 +97,24 @@ private final class ByteCounter: NSObject, URLSessionDataDelegate {
         return total
     }
 
+    func stop() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
         total += data.count
         lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let halted = stopped
+        lock.unlock()
+        guard !halted, error == nil, let makeTask else { return }
+        makeTask().resume()
     }
 }
 
@@ -144,7 +161,9 @@ final class ShapingModel: ObservableObject {
     /// window after a short warm-up, fast.com style. Returns bits per second,
     /// or nil when nothing arrived (offline, or shaping at 100% loss).
     nonisolated static func measureBandwidth() async -> Int? {
-        guard let url = URL(string: "https://speed.cloudflare.com/__down?bytes=200000000") else {
+        // The endpoint rejects requests much above 50 MB; finished streams are
+        // respawned by ByteCounter, so the size only bounds one request.
+        guard let url = URL(string: "https://speed.cloudflare.com/__down?bytes=50000000") else {
             return nil
         }
         let counter = ByteCounter()
@@ -152,8 +171,12 @@ final class ShapingModel: ObservableObject {
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.timeoutIntervalForRequest = 10
         let session = URLSession(configuration: config, delegate: counter, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        for _ in 0..<3 { session.dataTask(with: url).resume() }
+        counter.makeTask = { session.dataTask(with: url) }
+        defer {
+            counter.stop()
+            session.invalidateAndCancel()
+        }
+        for _ in 0..<3 { counter.makeTask?().resume() }
         try? await Task.sleep(nanoseconds: 750_000_000)
         let startBytes = counter.snapshot
         let startTime = Date()
