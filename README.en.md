@@ -27,8 +27,8 @@ Requirements: macOS 13+, Apple Silicon. The app updates itself (Sparkle):
 Click the speedometer → pick a speed → enter the administrator password
 (the standard macOS dialog asks for it; the app never sees the password).
 While shaping is active the icon turns into a tortoise. The top of the menu
-shows your current speed live (↓ download and ↑ upload), refreshing every
-second while the menu is open. "Turn Off" restores normal networking, and
+shows your current download speed live, refreshing every second while the
+menu is open. "Turn Off" restores normal networking, and
 "Custom…" covers latency, packet loss, and asymmetric limits.
 
 The menu speeds are round tiers that cap the internet in both directions at
