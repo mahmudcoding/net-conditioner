@@ -1,6 +1,6 @@
 {
   "name": "net-conditioner",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "macOS menu-bar network conditioner — bandwidth caps, latency, and packet loss via dummynet/pf",
