@@ -44,12 +44,12 @@ struct ShapingState: Equatable {
     }
 
     var summary: String {
-        guard active else { return "Shaping off" }
+        guard active else { return "No limit" }
         let name: String
         if !preset.isEmpty && downBps > 0 && downBps == upBps {
             name = "\(Self.rate(downBps))/s"
         } else if preset.isEmpty {
-            name = "custom shape"
+            name = "custom"
         } else {
             name = preset
         }
