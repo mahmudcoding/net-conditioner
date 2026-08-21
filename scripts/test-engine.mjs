@@ -106,6 +106,22 @@ console.log('dry-run: preset 250kbit')
   })())
 }
 
+console.log('queue sizing (dnctl slot queues cap at 100, so KBytes form)')
+{
+  check('50mbit gets a ~100ms BDP byte queue',
+    run('preset', '50mbit', '--dry-run').stdout.includes('queue 610Kbytes'))
+  check('low tiers keep the burst-absorbing floor',
+    run('preset', '100kbit', '--dry-run').stdout.includes('queue 32Kbytes'))
+  check('added RTT grows the budget', (() => {
+    const r = run('set', '--down', '2mbit', '--rtt', '300', '--dry-run')
+    return r.stdout.includes('queue 61Kbytes')
+  })())
+  check('no bare slot counts above 100 ever emitted', (() => {
+    const r = run('set', '--down', '1gbit', '--dry-run')
+    return r.stdout.includes('queue 1000Kbytes')
+  })())
+}
+
 console.log('dry-run: off')
 {
   const r = run('off', '--dry-run')

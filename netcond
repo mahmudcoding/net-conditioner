@@ -162,15 +162,17 @@ plr_of() { awk -v p="$1" 'BEGIN { printf "%.5f", p / 100 }'; }
 
 is_zero() { awk -v v="$1" 'BEGIN { exit !(v == 0) }'; }
 
-queue_slots() { # bw_bps delay_ms -> slots sized to the bandwidth-delay product
-  # Budget for a typical ~100 ms real-world path on top of any added delay:
-  # a 50-packet queue at tens of Mbit/s makes TCP collapse far below the cap,
-  # which would emulate a much worse link than the configured speed.
+queue_size() { # bw_bps delay_ms -> dnctl queue argument, in KBytes
+  # Budget ~100 ms of real-world path RTT on top of any added delay so a
+  # single TCP flow can actually reach the cap. Slot-based dnctl queues max
+  # out at 100 packets — far too small for tens of Mbit/s — so the queue is
+  # expressed in KBytes, clamped to dummynet's 1 MB ceiling and to a floor
+  # that still absorbs slow-start bursts on the low tiers.
   awk -v bw="$1" -v d="$2" 'BEGIN {
-    s = int(bw * ((d + 100) / 1000) / 12000) + 50
-    if (s < 50) s = 50
-    if (s > 500) s = 500
-    printf "%d", s
+    kb = int(bw * ((d + 100) / 1000) / 8 / 1024)
+    if (kb < 32) kb = 32
+    if (kb > 1000) kb = 1000
+    printf "%dKbytes", kb
   }'
 }
 
@@ -264,9 +266,9 @@ cmd_apply() {
 
   local in_args out_args
   in_args=(pipe "$PIPE_IN" config bw "${DOWN_BPS}bit/s" delay "$delay_in" plr "$plr_in")
-  [ "$DOWN_BPS" != 0 ] && in_args=("${in_args[@]}" queue "$(queue_slots "$DOWN_BPS" "$delay_in")")
+  [ "$DOWN_BPS" != 0 ] && in_args=("${in_args[@]}" queue "$(queue_size "$DOWN_BPS" "$delay_in")")
   out_args=(pipe "$PIPE_OUT" config bw "${UP_BPS}bit/s" delay "$delay_out" plr "$plr_out")
-  [ "$UP_BPS" != 0 ] && out_args=("${out_args[@]}" queue "$(queue_slots "$UP_BPS" "$delay_out")")
+  [ "$UP_BPS" != 0 ] && out_args=("${out_args[@]}" queue "$(queue_size "$UP_BPS" "$delay_out")")
 
   run_priv "$DNCTL" "${in_args[@]}"
   run_priv "$DNCTL" "${out_args[@]}"
