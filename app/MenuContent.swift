@@ -4,7 +4,6 @@ import SwiftUI
 struct MenuContent: View {
     @ObservedObject var model: ShapingModel
     let updaterController: SPUStandardUpdaterController
-    @Environment(\.openWindow) private var openWindow
 
     private static let presets: [(id: String, title: String)] = [
         ("100kbit", "100 kbit/s"),
@@ -19,58 +18,88 @@ struct MenuContent: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(model.state.summary)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.secondary)
-            if !model.throughput.isEmpty {
-                Text(model.throughput)
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.state.summary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(model.state.active ? Color.accentColor : .secondary)
+                if !model.throughput.isEmpty {
+                    Text(model.throughput)
+                        .font(.system(size: 12))
+                        .foregroundColor(.primary)
+                }
+                if model.state.active && !model.state.detail.isEmpty {
+                    Text(model.state.detail)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
             }
-            if model.state.active && !model.state.detail.isEmpty {
-                Text(model.state.detail)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
-            Divider().padding(.vertical, 4)
+            .padding(.horizontal, 9)
+            .padding(.top, 6)
+            .padding(.bottom, 7)
+
+            PanelDivider()
             ForEach(Self.presets, id: \.id) { preset in
-                row(marked(preset.id, preset.title)) { model.applyPreset(preset.id) }
+                PanelRow(
+                    title: preset.title,
+                    checked: model.state.active && model.state.preset == preset.id
+                ) {
+                    model.applyPreset(preset.id)
+                }
             }
-            row("Custom…") {
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "custom")
-            }
-            Divider().padding(.vertical, 4)
-            row("Turn Off") { model.turnOff() }
-                .disabled(!model.state.active)
-            Divider().padding(.vertical, 4)
-            if model.passwordFree {
-                row("Disable Password-Free Switching…") { model.setPasswordFree(false) }
-            } else {
-                row("Enable Password-Free Switching…") { model.setPasswordFree(true) }
-            }
-            row("Check for Updates…") { updaterController.checkForUpdates(nil) }
-            row("Quit Net Conditioner") { NSApplication.shared.terminate(nil) }
+
+            PanelDivider()
+            PanelRow(title: "Turn Off", enabled: model.state.active) { model.turnOff() }
+
+            PanelDivider()
+            PanelRow(title: "Check for Updates…") { updaterController.checkForUpdates(nil) }
+            PanelRow(title: "Quit Net Conditioner") { NSApplication.shared.terminate(nil) }
         }
-        .padding(10)
-        .frame(width: 220)
+        .padding(6)
+        .frame(width: 230)
         .background(PanelVisibility(model: model))
     }
+}
 
-    private func row(_ title: String, action: @escaping () -> Void) -> some View {
+private struct PanelDivider: View {
+    var body: some View {
+        Divider().padding(.horizontal, 9).padding(.vertical, 4)
+    }
+}
+
+/// A native-menu-feeling row: full-width hover highlight in the accent
+/// color, a trailing checkmark for the active tier, dimmed when disabled.
+private struct PanelRow: View {
+    let title: String
+    var checked = false
+    var enabled = true
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
         Button(action: action) {
             HStack {
                 Text(title)
-                Spacer(minLength: 0)
+                    .fontWeight(checked ? .semibold : .regular)
+                Spacer(minLength: 12)
+                if checked {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .semibold))
+                }
             }
             .contentShape(Rectangle())
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(hovering && enabled ? Color.accentColor : Color.clear)
+            )
+            .foregroundColor(hovering && enabled ? .white : .primary)
         }
         .buttonStyle(.plain)
-        .padding(.vertical, 3)
-    }
-
-    private func marked(_ id: String, _ title: String) -> String {
-        model.state.active && model.state.preset == id ? "● \(title)" : title
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .onHover { hovering = $0 && enabled }
     }
 }

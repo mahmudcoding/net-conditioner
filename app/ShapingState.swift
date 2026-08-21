@@ -54,7 +54,7 @@ struct ShapingState: Equatable {
             name = preset
         }
         let scope = hosts.isEmpty ? "" : " → \(hosts.joined(separator: ", "))"
-        return "Active: \(name)\(scope)"
+        return "Limit: \(name)\(scope)"
     }
 
     var detail: String {
@@ -155,13 +155,10 @@ final class ShapingModel: ObservableObject {
     /// Speed line updates from the byte delta every two seconds. After a few
     /// refreshes the streams stop so an open panel doesn't download forever;
     /// the last value is kept and reused for the first paint on reopen.
-    @Published var passwordFree = passwordlessShapingAvailable()
-
     func panelDidOpen() {
         guard !panelVisible else { return }
         panelVisible = true
         refresh()
-        passwordFree = passwordlessShapingAvailable()
         // Never show a stale number: the line stays empty until the current
         // panel session has actually measured something.
         throughput = ""
@@ -267,8 +264,6 @@ final class ShapingModel: ObservableObject {
 
     func applyPreset(_ name: String) { runOperation(["preset", name]) }
 
-    func applyCustom(_ arguments: [String]) { runOperation(["set"] + arguments) }
-
     func turnOff() { runOperation(["off"]) }
 
     private func runOperation(_ arguments: [String]) {
@@ -300,44 +295,6 @@ final class ShapingModel: ObservableObject {
         if bps >= 10_000_000 { return "\(Int((Double(bps) / 1_000_000).rounded())) Mbit/s" }
         if bps >= 1_000_000 { return String(format: "%.1f Mbit/s", Double(bps) / 1_000_000) }
         return "\(Int((Double(bps) / 1_000).rounded())) kbit/s"
-    }
-
-    func setPasswordFree(_ enable: Bool) {
-        guard !busy else { return }
-        let confirm = NSAlert()
-        if enable {
-            confirm.messageText = "Switch without a password?"
-            confirm.informativeText = "You enter the administrator password one last time. "
-                + "It installs \(sudoersRulePath), letting your user run the two shaping "
-                + "tools (dnctl, pfctl) without a password — which also means any local "
-                + "process could change traffic shaping silently. Undo anytime from this menu."
-            confirm.addButton(withTitle: "Enable")
-        } else {
-            confirm.messageText = "Ask for the password again?"
-            confirm.informativeText = "Removes \(sudoersRulePath); every shaping change "
-                + "will ask for the administrator password again."
-            confirm.addButton(withTitle: "Disable")
-        }
-        confirm.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        guard confirm.runModal() == .alertFirstButtonReturn else { return }
-        busy = true
-        Task.detached(priority: .userInitiated) {
-            let failure: String?
-            do {
-                if enable { try installPasswordFreeRule() } else { try removePasswordFreeRule() }
-                failure = nil
-            } catch EngineError.cancelled {
-                failure = nil
-            } catch {
-                failure = error.localizedDescription
-            }
-            await MainActor.run {
-                self.busy = false
-                self.passwordFree = passwordlessShapingAvailable()
-                if let failure { Self.alert(title: "Net Conditioner", text: failure) }
-            }
-        }
     }
 
     static func alert(title: String, text: String) {

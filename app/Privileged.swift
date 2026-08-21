@@ -46,17 +46,26 @@ func passwordlessShapingAvailable() -> Bool {
     return probe.terminationStatus == 0
 }
 
-/// Runs one whole engine operation with root rights: silently through the
-/// sudoers rule when it is installed, otherwise behind the standard macOS
-/// administrator dialog (one password prompt per operation). Blocking —
-/// call it off the main thread. The app never sees the password.
+/// Runs one whole engine operation with root rights. After the very first
+/// use it is always silent: the first run shows the standard macOS
+/// administrator dialog once, and that single privileged invocation both
+/// installs the narrow no-password rule for the two shaping tools and
+/// performs the requested change — every later operation runs without any
+/// prompt. Blocking — call it off the main thread. The app never sees the
+/// password.
 func runPrivileged(_ arguments: [String]) throws {
     if passwordlessShapingAvailable() {
         try runEngineAsUser(arguments)
         return
     }
-    let command = ([try engineURL().path] + arguments).map(shellQuoted).joined(separator: " ")
-    try runAdminShell(command)
+    let engine = ([try engineURL().path] + arguments).map(shellQuoted).joined(separator: " ")
+    let user = shellQuoted(NSUserName())
+    try runAdminShell(
+        "printf '%s ALL=(root) NOPASSWD: /usr/sbin/dnctl, /sbin/pfctl\\n' \(user)"
+        + " > \(sudoersRulePath) && chmod 440 \(sudoersRulePath)"
+        + " && /usr/sbin/visudo -c -f \(sudoersRulePath)"
+        + " && \(engine)"
+    )
 }
 
 /// The engine as the plain user; its internal sudo calls succeed without
@@ -101,19 +110,4 @@ func runAdminShell(_ command: String) throws {
 }
 
 let sudoersRulePath = "/etc/sudoers.d/netcond-tools"
-
-/// Installs the narrow sudoers rule (one last password prompt); afterwards
-/// shaping changes never ask again.
-func installPasswordFreeRule() throws {
-    let user = shellQuoted(NSUserName())
-    try runAdminShell(
-        "printf '%s ALL=(root) NOPASSWD: /usr/sbin/dnctl, /sbin/pfctl\\n' \(user)"
-        + " > \(sudoersRulePath) && chmod 440 \(sudoersRulePath)"
-        + " && /usr/sbin/visudo -c -f \(sudoersRulePath)"
-    )
-}
-
-func removePasswordFreeRule() throws {
-    try runAdminShell("rm -f \(sudoersRulePath)")
-}
 

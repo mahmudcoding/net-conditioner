@@ -30,14 +30,14 @@ While shaping is active the icon turns into a tortoise. The top of the panel
 shows the connection's available speed: opening it starts a built-in
 measurement with parallel downloads that refreshes the number every couple
 of seconds and stops after a few updates (the result is cached for two
-minutes). "Turn Off" restores normal networking, and "Custom…" covers
-latency, packet loss, and asymmetric limits.
+minutes). "Turn Off" restores normal networking. Latency, packet loss, and
+asymmetric limits are available from the terminal (`netcond set`).
 
-Tired of password prompts? "Enable Password-Free Switching…" in the menu:
-one final administrator password installs the narrow rule
-`/etc/sudoers.d/netcond-tools` (covering only `dnctl` and `pfctl`), after
-which switching is instant and silent. The tradeoff: any local process can
-then change shaping without a password too. Disable it from the same menu.
+The administrator password is asked exactly once — on the very first
+change. That same step installs the narrow rule
+`/etc/sudoers.d/netcond-tools` (covering only `dnctl` and `pfctl`), and
+every later switch is instant and silent. To bring the prompts back:
+`sudo rm /etc/sudoers.d/netcond-tools`.
 
 The menu speeds are round tiers that cap the internet in both directions at
 once: **100 kbit/s · 250 kbit/s · 500 kbit/s · 1 Mbit/s · 2 Mbit/s ·

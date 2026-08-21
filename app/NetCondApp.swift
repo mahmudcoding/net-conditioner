@@ -18,11 +18,5 @@ struct NetCondApp: App {
             Image(systemName: model.state.active ? "tortoise.fill" : "speedometer")
         }
         .menuBarExtraStyle(.window)
-
-        Window("Custom Shape", id: "custom") {
-            CustomShapeView(model: model)
-        }
-        .windowResizability(.contentSize)
-        .defaultPosition(.center)
     }
 }
