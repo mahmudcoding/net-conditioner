@@ -20,7 +20,12 @@ struct MenuContent: View {
 
     var body: some View {
         Text(model.state.summary)
-            .onAppear { model.refresh() }
+            .onAppear {
+                model.refresh()
+                model.startSampling()
+            }
+            .onDisappear { model.stopSampling() }
+        Text(model.throughput)
         if model.state.active && !model.state.detail.isEmpty {
             Text(model.state.detail)
         }
@@ -35,7 +40,6 @@ struct MenuContent: View {
         Divider()
         Button("Turn Off") { model.turnOff() }
             .disabled(!model.state.active)
-        Button("Check Connection…") { model.verify() }
         Divider()
         Button("Check for Updates…") { updaterController.checkForUpdates(nil) }
         Button("Quit Net Conditioner") { NSApplication.shared.terminate(nil) }

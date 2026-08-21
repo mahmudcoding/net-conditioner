@@ -87,8 +87,70 @@ struct ShapingState: Equatable {
 final class ShapingModel: ObservableObject {
     @Published var state = ShapingState.load()
     @Published var busy = false
+    @Published var throughput = "↓ …   ↑ …"
+
+    private var sampler: Timer?
+    private var lastSample: (time: Date, rx: UInt64, tx: UInt64)?
 
     func refresh() { state = ShapingState.load() }
+
+    /// Live current-traffic readout for the menu, sampled from the network
+    /// interface counters once a second — no test downloads involved. The
+    /// timer runs in the .common run-loop modes so it keeps firing while the
+    /// menu is open (menu tracking blocks the default mode and the main
+    /// dispatch queue).
+    func startSampling() {
+        stopSampling()
+        if let counters = Self.readInterfaceCounters() {
+            lastSample = (Date(), counters.rx, counters.tx)
+        }
+        throughput = "↓ …   ↑ …"
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sampleTick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        sampler = timer
+    }
+
+    func stopSampling() {
+        sampler?.invalidate()
+        sampler = nil
+        lastSample = nil
+    }
+
+    private func sampleTick() {
+        guard let counters = Self.readInterfaceCounters() else { return }
+        let now = Date()
+        defer { lastSample = (now, counters.rx, counters.tx) }
+        guard let last = lastSample else { return }
+        let dt = now.timeIntervalSince(last.time)
+        guard dt > 0.2 else { return }
+        // A 32-bit interface counter can wrap; a shrinking total reads as 0.
+        let rx = counters.rx >= last.rx ? counters.rx - last.rx : 0
+        let tx = counters.tx >= last.tx ? counters.tx - last.tx : 0
+        let down = Int(Double(rx) * 8 / dt)
+        let up = Int(Double(tx) * 8 / dt)
+        throughput = "↓ \(Self.speedText(down))   ↑ \(Self.speedText(up))"
+    }
+
+    nonisolated static func readInterfaceCounters() -> (rx: UInt64, tx: UInt64)? {
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0 else { return nil }
+        defer { freeifaddrs(addrs) }
+        var rx: UInt64 = 0
+        var tx: UInt64 = 0
+        var pointer = addrs
+        while let entry = pointer {
+            let ifa = entry.pointee
+            pointer = ifa.ifa_next
+            guard let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_LINK) else { continue }
+            guard String(cString: ifa.ifa_name) != "lo0" else { continue }
+            guard let data = ifa.ifa_data?.assumingMemoryBound(to: if_data.self) else { continue }
+            rx &+= UInt64(data.pointee.ifi_ibytes)
+            tx &+= UInt64(data.pointee.ifi_obytes)
+        }
+        return (rx, tx)
+    }
 
     func applyPreset(_ name: String) { runOperation(["preset", name]) }
 
@@ -110,57 +172,6 @@ final class ShapingModel: ObservableObject {
                 if let failure { Self.alert(title: "Net Conditioner", text: failure) }
             }
         }
-    }
-
-    func verify() {
-        guard !busy else { return }
-        busy = true
-        Task.detached(priority: .userInitiated) {
-            let text: String
-            do {
-                let output = try runEngine(["verify", "--probes", "30", "--porcelain"])
-                text = Self.verifySummary(output)
-            } catch {
-                text = "The connection check failed to run: \(error.localizedDescription)"
-            }
-            await MainActor.run {
-                self.busy = false
-                Self.alert(title: "Connection Check", text: text)
-            }
-        }
-    }
-
-    /// Turns the engine's KEY=VALUE verify report into a few plain lines.
-    nonisolated static func verifySummary(_ porcelain: String) -> String {
-        var values: [String: String] = [:]
-        for line in porcelain.split(separator: "\n") {
-            guard let separator = line.firstIndex(of: "=") else { continue }
-            values[String(line[..<separator])] = String(line[line.index(after: separator)...])
-        }
-        guard values["VERDICT"] != nil else {
-            return porcelain.isEmpty ? "The connection check produced no result." : porcelain
-        }
-
-        var lines: [String] = []
-        switch values["DOWN_STATE"] {
-        case "ok":
-            let measured = Int(values["DOWN_BPS_MEASURED"] ?? "") ?? 0
-            var line = "Speed: \(speedText(measured))"
-            if let cap = Int(values["CAP_DOWN_BPS"] ?? ""), cap > 0 {
-                line += " (limit \(speedText(cap)))"
-            }
-            lines.append(line)
-        case "failed":
-            lines.append("Speed: could not be measured")
-        default:
-            lines.append("Speed: not measured (shaping is limited to chosen hosts)")
-        }
-
-        if values["VERDICT"] == "warn" {
-            lines.append("")
-            lines.append("Shaping may not be working: \(values["WARNINGS"] ?? "measurements don't match the configured shape").")
-        }
-        return lines.joined(separator: "\n")
     }
 
     nonisolated static func speedText(_ bps: Int) -> String {

@@ -51,16 +51,3 @@ func runPrivileged(_ arguments: [String]) throws {
     }
 }
 
-/// Runs an engine command that needs no privileges (verify, status).
-func runEngine(_ arguments: [String]) throws -> String {
-    let process = Process()
-    process.executableURL = try engineURL()
-    process.arguments = arguments
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    try process.run()
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    return String(data: data, encoding: .utf8) ?? ""
-}
