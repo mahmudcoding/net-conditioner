@@ -19,31 +19,54 @@ struct MenuContent: View {
     ]
 
     var body: some View {
-        Text(model.state.summary)
-            .onAppear {
-                model.refresh()
-                model.refreshBandwidth()
+        VStack(alignment: .leading, spacing: 2) {
+            Text(model.state.summary)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary)
+            if !model.throughput.isEmpty {
+                Text(model.throughput)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
             }
-        if !model.throughput.isEmpty {
-            Text(model.throughput)
+            if model.state.active && !model.state.detail.isEmpty {
+                Text(model.state.detail)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            Divider().padding(.vertical, 4)
+            ForEach(Self.presets, id: \.id) { preset in
+                row(marked(preset.id, preset.title)) { model.applyPreset(preset.id) }
+            }
+            row("Custom…") {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "custom")
+            }
+            Divider().padding(.vertical, 4)
+            row("Turn Off") { model.turnOff() }
+                .disabled(!model.state.active)
+            Divider().padding(.vertical, 4)
+            row("Check for Updates…") { updaterController.checkForUpdates(nil) }
+            row("Quit Net Conditioner") { NSApplication.shared.terminate(nil) }
         }
-        if model.state.active && !model.state.detail.isEmpty {
-            Text(model.state.detail)
+        .padding(10)
+        .frame(width: 220)
+        .onAppear {
+            model.refresh()
+            model.panelDidOpen()
         }
-        Divider()
-        ForEach(Self.presets, id: \.id) { preset in
-            Button(marked(preset.id, preset.title)) { model.applyPreset(preset.id) }
+        .onDisappear { model.panelDidClose() }
+    }
+
+    private func row(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(title)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
         }
-        Button("Custom…") {
-            NSApp.activate(ignoringOtherApps: true)
-            openWindow(id: "custom")
-        }
-        Divider()
-        Button("Turn Off") { model.turnOff() }
-            .disabled(!model.state.active)
-        Divider()
-        Button("Check for Updates…") { updaterController.checkForUpdates(nil) }
-        Button("Quit Net Conditioner") { NSApplication.shared.terminate(nil) }
+        .buttonStyle(.plain)
+        .padding(.vertical, 3)
     }
 
     private func marked(_ id: String, _ title: String) -> String {

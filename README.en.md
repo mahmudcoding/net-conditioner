@@ -26,11 +26,12 @@ Requirements: macOS 13+, Apple Silicon. The app updates itself (Sparkle):
 
 Click the speedometer → pick a speed → enter the administrator password
 (the standard macOS dialog asks for it; the app never sees the password).
-While shaping is active the icon turns into a tortoise. The top of the menu
-shows the connection's available speed: opening the menu runs a short
-(~3-second) built-in measurement with parallel downloads and caches the
-result for two minutes. "Turn Off" restores normal networking, and "Custom…"
-covers latency, packet loss, and asymmetric limits.
+While shaping is active the icon turns into a tortoise. The top of the panel
+shows the connection's available speed: opening it starts a built-in
+measurement with parallel downloads that refreshes the number every couple
+of seconds and stops after a few updates (the result is cached for two
+minutes). "Turn Off" restores normal networking, and "Custom…" covers
+latency, packet loss, and asymmetric limits.
 
 The menu speeds are round tiers that cap the internet in both directions at
 once: **100 kbit/s · 250 kbit/s · 500 kbit/s · 1 Mbit/s · 2 Mbit/s ·

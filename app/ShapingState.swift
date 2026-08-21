@@ -124,80 +124,90 @@ final class ShapingModel: ObservableObject {
     @Published var busy = false
     @Published var throughput = ""
 
-    private var measuring = false
     private var lastMeasurement: (bps: Int, at: Date, key: String)?
-    private var measureSession: URLSession?
-    private var measureCounter: ByteCounter?
-    private var measureTimers: [Timer] = []
-    private var windowStart: (bytes: Int, time: Date)?
+    private var loopSession: URLSession?
+    private var loopCounter: ByteCounter?
+    private var loopTimer: Timer?
+    private var loopTicks = 0
+    private var lastTickBytes = 0
+    private var lastTickTime = Date()
+    private var panelVisible = false
 
     func refresh() { state = ShapingState.load() }
 
-    /// Fills the menu's Speed line with the connection's available bandwidth:
-    /// three parallel downloads measured over a fixed 2.5-second window after
-    /// a short warm-up (fast.com style, quick even under a heavy cap), cached
-    /// for two minutes unless the shaping state changed. The line stays empty
-    /// until a measurement exists. Everything is orchestrated by run-loop
-    /// timers in the .common modes because the main dispatch queue — and with
-    /// it MainActor.run — is not serviced while the menu is being tracked.
-    func refreshBandwidth() {
-        let key = "\(state.active)|\(state.preset)|\(state.appliedAt)"
-        if let last = lastMeasurement, last.key == key,
+    private var stateKey: String { "\(state.active)|\(state.preset)|\(state.appliedAt)" }
+
+    /// The panel shows the connection's available bandwidth and keeps it
+    /// fresh while open: three parallel downloads run continuously and the
+    /// Speed line updates from the byte delta every two seconds. After a few
+    /// refreshes the streams stop so an open panel doesn't download forever;
+    /// the last value is kept and reused for the first paint on reopen.
+    func panelDidOpen() {
+        panelVisible = true
+        if let last = lastMeasurement, last.key == stateKey,
            Date().timeIntervalSince(last.at) < 120 {
             throughput = "Speed: \(Self.speedText(last.bps))"
-            return
+        } else {
+            throughput = ""
         }
-        guard !measuring else { return }
+        startBandwidthLoop()
+    }
+
+    func panelDidClose() {
+        panelVisible = false
+        stopBandwidthLoop()
+    }
+
+    private func startBandwidthLoop() {
+        stopBandwidthLoop()
         // The endpoint rejects requests much above 50 MB; finished streams are
         // respawned by ByteCounter, so the size only bounds one request.
         guard let url = URL(string: "https://speed.cloudflare.com/__down?bytes=50000000") else {
             return
         }
-        measuring = true
-        throughput = ""
-
         let counter = ByteCounter()
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.timeoutIntervalForRequest = 10
         let session = URLSession(configuration: config, delegate: counter, delegateQueue: nil)
         counter.makeTask = { session.dataTask(with: url) }
-        measureSession = session
-        measureCounter = counter
+        loopSession = session
+        loopCounter = counter
+        loopTicks = 0
+        lastTickBytes = 0
+        lastTickTime = Date()
         for _ in 0..<3 { counter.makeTask?().resume() }
-
-        let warmup = Timer(timeInterval: 0.75, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, let counter = self.measureCounter else { return }
-                self.windowStart = (counter.snapshot, Date())
-            }
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.bandwidthTick() }
         }
-        let finish = Timer(timeInterval: 3.25, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.finishMeasurement(key: key) }
-        }
-        RunLoop.main.add(warmup, forMode: .common)
-        RunLoop.main.add(finish, forMode: .common)
-        measureTimers = [warmup, finish]
+        RunLoop.main.add(timer, forMode: .common)
+        loopTimer = timer
     }
 
-    private func finishMeasurement(key: String) {
-        defer {
-            measureCounter?.stop()
-            measureSession?.invalidateAndCancel()
-            measureSession = nil
-            measureCounter = nil
-            for timer in measureTimers { timer.invalidate() }
-            measureTimers = []
-            windowStart = nil
-            measuring = false
+    private func bandwidthTick() {
+        guard let counter = loopCounter else { return }
+        let now = Date()
+        let bytes = counter.snapshot
+        let delta = bytes - lastTickBytes
+        let elapsed = now.timeIntervalSince(lastTickTime)
+        lastTickBytes = bytes
+        lastTickTime = now
+        loopTicks += 1
+        if delta > 0, elapsed > 0 {
+            let bps = Int(Double(delta) * 8 / elapsed)
+            lastMeasurement = (bps, now, stateKey)
+            throughput = "Speed: \(Self.speedText(bps))"
         }
-        guard let counter = measureCounter, let start = windowStart else { return }
-        let bytes = counter.snapshot - start.bytes
-        let elapsed = Date().timeIntervalSince(start.time)
-        guard bytes > 0, elapsed > 0 else { return }
-        let bps = Int(Double(bytes) * 8 / elapsed)
-        lastMeasurement = (bps, Date(), key)
-        throughput = "Speed: \(Self.speedText(bps))"
+        if loopTicks >= 3 { stopBandwidthLoop() }
+    }
+
+    private func stopBandwidthLoop() {
+        loopTimer?.invalidate()
+        loopTimer = nil
+        loopCounter?.stop()
+        loopSession?.invalidateAndCancel()
+        loopCounter = nil
+        loopSession = nil
     }
 
     func applyPreset(_ name: String) { runOperation(["preset", name]) }
@@ -217,6 +227,10 @@ final class ShapingModel: ObservableObject {
             await MainActor.run {
                 self.busy = false
                 self.refresh()
+                // The shape changed, so the displayed bandwidth is stale;
+                // re-measure right away if the panel is showing.
+                self.throughput = ""
+                if self.panelVisible { self.startBandwidthLoop() }
                 if let failure { Self.alert(title: "Net Conditioner", text: failure) }
             }
         }

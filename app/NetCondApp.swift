@@ -17,6 +17,7 @@ struct NetCondApp: App {
         } label: {
             Image(systemName: model.state.active ? "tortoise.fill" : "speedometer")
         }
+        .menuBarExtraStyle(.window)
 
         Window("Custom Shape", id: "custom") {
             CustomShapeView(model: model)
