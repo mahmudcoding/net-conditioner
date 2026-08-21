@@ -122,17 +122,24 @@ private final class ByteCounter: NSObject, URLSessionDataDelegate {
 final class ShapingModel: ObservableObject {
     @Published var state = ShapingState.load()
     @Published var busy = false
-    @Published var throughput = "Speed: …"
+    @Published var throughput = ""
 
     private var measuring = false
     private var lastMeasurement: (bps: Int, at: Date, key: String)?
+    private var measureSession: URLSession?
+    private var measureCounter: ByteCounter?
+    private var measureTimers: [Timer] = []
+    private var windowStart: (bytes: Int, time: Date)?
 
     func refresh() { state = ShapingState.load() }
 
     /// Fills the menu's Speed line with the connection's available bandwidth:
-    /// a ~3-second burst of parallel downloads over a fixed time window (so it
-    /// stays quick even under a heavy cap), cached for two minutes unless the
-    /// shaping state changed.
+    /// three parallel downloads measured over a fixed 2.5-second window after
+    /// a short warm-up (fast.com style, quick even under a heavy cap), cached
+    /// for two minutes unless the shaping state changed. The line stays empty
+    /// until a measurement exists. Everything is orchestrated by run-loop
+    /// timers in the .common modes because the main dispatch queue — and with
+    /// it MainActor.run — is not serviced while the menu is being tracked.
     func refreshBandwidth() {
         let key = "\(state.active)|\(state.preset)|\(state.appliedAt)"
         if let last = lastMeasurement, last.key == key,
@@ -141,50 +148,56 @@ final class ShapingModel: ObservableObject {
             return
         }
         guard !measuring else { return }
-        measuring = true
-        throughput = "Speed: …"
-        Task.detached(priority: .userInitiated) {
-            let measured = await Self.measureBandwidth()
-            await MainActor.run {
-                self.measuring = false
-                if let measured {
-                    self.lastMeasurement = (measured, Date(), key)
-                    self.throughput = "Speed: \(Self.speedText(measured))"
-                } else {
-                    self.throughput = "Speed: —"
-                }
-            }
-        }
-    }
-
-    /// Sums bytes received by three parallel downloads during a 2.5-second
-    /// window after a short warm-up, fast.com style. Returns bits per second,
-    /// or nil when nothing arrived (offline, or shaping at 100% loss).
-    nonisolated static func measureBandwidth() async -> Int? {
         // The endpoint rejects requests much above 50 MB; finished streams are
         // respawned by ByteCounter, so the size only bounds one request.
         guard let url = URL(string: "https://speed.cloudflare.com/__down?bytes=50000000") else {
-            return nil
+            return
         }
+        measuring = true
+        throughput = ""
+
         let counter = ByteCounter()
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.timeoutIntervalForRequest = 10
         let session = URLSession(configuration: config, delegate: counter, delegateQueue: nil)
         counter.makeTask = { session.dataTask(with: url) }
-        defer {
-            counter.stop()
-            session.invalidateAndCancel()
-        }
+        measureSession = session
+        measureCounter = counter
         for _ in 0..<3 { counter.makeTask?().resume() }
-        try? await Task.sleep(nanoseconds: 750_000_000)
-        let startBytes = counter.snapshot
-        let startTime = Date()
-        try? await Task.sleep(nanoseconds: 2_500_000_000)
-        let bytes = counter.snapshot - startBytes
-        let elapsed = Date().timeIntervalSince(startTime)
-        guard bytes > 0, elapsed > 0 else { return nil }
-        return Int(Double(bytes) * 8 / elapsed)
+
+        let warmup = Timer(timeInterval: 0.75, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let counter = self.measureCounter else { return }
+                self.windowStart = (counter.snapshot, Date())
+            }
+        }
+        let finish = Timer(timeInterval: 3.25, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.finishMeasurement(key: key) }
+        }
+        RunLoop.main.add(warmup, forMode: .common)
+        RunLoop.main.add(finish, forMode: .common)
+        measureTimers = [warmup, finish]
+    }
+
+    private func finishMeasurement(key: String) {
+        defer {
+            measureCounter?.stop()
+            measureSession?.invalidateAndCancel()
+            measureSession = nil
+            measureCounter = nil
+            for timer in measureTimers { timer.invalidate() }
+            measureTimers = []
+            windowStart = nil
+            measuring = false
+        }
+        guard let counter = measureCounter, let start = windowStart else { return }
+        let bytes = counter.snapshot - start.bytes
+        let elapsed = Date().timeIntervalSince(start.time)
+        guard bytes > 0, elapsed > 0 else { return }
+        let bps = Int(Double(bytes) * 8 / elapsed)
+        lastMeasurement = (bps, Date(), key)
+        throughput = "Speed: \(Self.speedText(bps))"
     }
 
     func applyPreset(_ name: String) { runOperation(["preset", name]) }

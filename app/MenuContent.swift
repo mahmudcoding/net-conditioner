@@ -24,7 +24,9 @@ struct MenuContent: View {
                 model.refresh()
                 model.refreshBandwidth()
             }
-        Text(model.throughput)
+        if !model.throughput.isEmpty {
+            Text(model.throughput)
+        }
         if model.state.active && !model.state.detail.isEmpty {
             Text(model.state.detail)
         }
