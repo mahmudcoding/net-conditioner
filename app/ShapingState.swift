@@ -85,10 +85,14 @@ struct ShapingState: Equatable {
 
 /// Counts bytes across the parallel measurement downloads and replaces any
 /// stream that finishes early, so per-request size limits never cap the test.
+/// Streams answered with an HTTP error (rate limits included) are cancelled
+/// without counting the error body and are never respawned, and respawns are
+/// capped so a misbehaving endpoint can't be hammered.
 private final class ByteCounter: NSObject, URLSessionDataDelegate {
     private let lock = NSLock()
     private var total = 0
     private var stopped = false
+    private var respawns = 0
     var makeTask: (() -> URLSessionDataTask)?
 
     var snapshot: Int {
@@ -103,6 +107,16 @@ private final class ByteCounter: NSObject, URLSessionDataDelegate {
         lock.unlock()
     }
 
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+        completionHandler((200..<300).contains(status) ? .allow : .cancel)
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
         total += data.count
@@ -111,7 +125,8 @@ private final class ByteCounter: NSObject, URLSessionDataDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         lock.lock()
-        let halted = stopped
+        let halted = stopped || respawns >= 20
+        if !halted && error == nil { respawns += 1 }
         lock.unlock()
         guard !halted, error == nil, let makeTask else { return }
         makeTask().resume()
@@ -124,18 +139,16 @@ final class ShapingModel: ObservableObject {
     @Published var busy = false
     @Published var throughput = ""
 
-    private var lastMeasurement: (bps: Int, at: Date, key: String)?
     private var loopSession: URLSession?
     private var loopCounter: ByteCounter?
     private var loopTimer: Timer?
     private var loopTicks = 0
+    private var loopUpdates = 0
     private var lastTickBytes = 0
     private var lastTickTime = Date()
     private var panelVisible = false
 
     func refresh() { state = ShapingState.load() }
-
-    private var stateKey: String { "\(state.active)|\(state.preset)|\(state.appliedAt)" }
 
     /// The panel shows the connection's available bandwidth and keeps it
     /// fresh while open: three parallel downloads run continuously and the
@@ -143,28 +156,41 @@ final class ShapingModel: ObservableObject {
     /// refreshes the streams stop so an open panel doesn't download forever;
     /// the last value is kept and reused for the first paint on reopen.
     func panelDidOpen() {
+        guard !panelVisible else { return }
         panelVisible = true
-        if let last = lastMeasurement, last.key == stateKey,
-           Date().timeIntervalSince(last.at) < 120 {
-            throughput = "Speed: \(Self.speedText(last.bps))"
-        } else {
-            throughput = ""
-        }
+        refresh()
+        // Never show a stale number: the line stays empty until the current
+        // panel session has actually measured something.
+        throughput = ""
         startBandwidthLoop()
     }
 
     func panelDidClose() {
+        guard panelVisible else { return }
         panelVisible = false
         stopBandwidthLoop()
     }
 
-    private func startBandwidthLoop() {
+    /// Public test files on independent hosts; the loop falls through them
+    /// when one stalls or rate-limits, and remembers which one last worked.
+    private static let measurementSources = [
+        "https://speed.cloudflare.com/__down?bytes=50000000",
+        "https://proof.ovh.net/files/100Mb.dat",
+        "https://fsn1-speed.hetzner.com/100MB.bin",
+    ]
+    private var loopSourceIndex = 0
+    private var loopInitialSource = 0
+    private var preferredSourceIndex = 0
+
+    private func startBandwidthLoop(sourceIndex: Int? = nil) {
         stopBandwidthLoop()
-        // The endpoint rejects requests much above 50 MB; finished streams are
-        // respawned by ByteCounter, so the size only bounds one request.
-        guard let url = URL(string: "https://speed.cloudflare.com/__down?bytes=50000000") else {
+        let index = sourceIndex ?? preferredSourceIndex
+        guard index < Self.measurementSources.count,
+              let url = URL(string: Self.measurementSources[index]) else {
             return
         }
+        loopSourceIndex = index
+        if sourceIndex == nil { loopInitialSource = index }
         let counter = ByteCounter()
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
@@ -174,6 +200,7 @@ final class ShapingModel: ObservableObject {
         loopSession = session
         loopCounter = counter
         loopTicks = 0
+        loopUpdates = 0
         lastTickBytes = 0
         lastTickTime = Date()
         for _ in 0..<3 { counter.makeTask?().resume() }
@@ -193,12 +220,31 @@ final class ShapingModel: ObservableObject {
         lastTickBytes = bytes
         lastTickTime = now
         loopTicks += 1
-        if delta > 0, elapsed > 0 {
+        // Header-sized dribbles are not a measurement: error bodies and
+        // stalled streams must never register as a (tiny) speed.
+        if delta >= 10_000, elapsed > 0 {
+            loopUpdates += 1
+            preferredSourceIndex = loopSourceIndex
             let bps = Int(Double(delta) * 8 / elapsed)
-            lastMeasurement = (bps, now, stateKey)
             throughput = "Speed: \(Self.speedText(bps))"
         }
-        if loopTicks >= 3 { stopBandwidthLoop() }
+        // Keep refreshing for as long as the panel is realistically being
+        // watched; the one-minute cap stops a forgotten-open panel from
+        // downloading forever (reopening starts a fresh measurement).
+        if loopTicks >= 30 {
+            stopBandwidthLoop()
+            return
+        }
+        // A source that produced essentially nothing by the first tick is
+        // refusing or dead — rotate to the next one, at most one full cycle.
+        if loopUpdates == 0, bytes < 2_000 {
+            let next = (loopSourceIndex + 1) % Self.measurementSources.count
+            if next != loopInitialSource {
+                startBandwidthLoop(sourceIndex: next)
+            } else {
+                stopBandwidthLoop()
+            }
+        }
     }
 
     private func stopBandwidthLoop() {
@@ -220,10 +266,15 @@ final class ShapingModel: ObservableObject {
         guard !busy else { return }
         busy = true
         Task.detached(priority: .userInitiated) {
-            var failure: String?
-            do { try runPrivileged(arguments) }
-            catch EngineError.cancelled {}
-            catch { failure = error.localizedDescription }
+            let failure: String?
+            do {
+                try runPrivileged(arguments)
+                failure = nil
+            } catch EngineError.cancelled {
+                failure = nil
+            } catch {
+                failure = error.localizedDescription
+            }
             await MainActor.run {
                 self.busy = false
                 self.refresh()

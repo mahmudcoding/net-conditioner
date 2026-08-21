@@ -50,11 +50,7 @@ struct MenuContent: View {
         }
         .padding(10)
         .frame(width: 220)
-        .onAppear {
-            model.refresh()
-            model.panelDidOpen()
-        }
-        .onDisappear { model.panelDidClose() }
+        .background(PanelVisibility(model: model))
     }
 
     private func row(_ title: String, action: @escaping () -> Void) -> some View {

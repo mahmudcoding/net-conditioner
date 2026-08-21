@@ -42,10 +42,13 @@ func runPrivileged(_ arguments: [String]) throws {
     guard let script = NSAppleScript(source: source) else {
         throw EngineError.failed("could not build the administrator command")
     }
-    if script.executeAndReturnError(&errorInfo) == nil {
-        let number = (errorInfo?[NSAppleScript.errorNumber] as? Int) ?? 0
+    // executeAndReturnError's return value is non-optional here; failure is
+    // signalled solely through the error dictionary.
+    _ = script.executeAndReturnError(&errorInfo)
+    if let errorInfo {
+        let number = (errorInfo[NSAppleScript.errorNumber] as? Int) ?? 0
         if number == -128 { throw EngineError.cancelled }
-        let message = (errorInfo?[NSAppleScript.errorMessage] as? String)
+        let message = (errorInfo[NSAppleScript.errorMessage] as? String)
             ?? "the administrator command failed"
         throw EngineError.failed(message)
     }
