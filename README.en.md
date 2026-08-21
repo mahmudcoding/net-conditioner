@@ -15,8 +15,11 @@ calls, VoIP, and games, not just page loads.
 1. Download `Net-Conditioner-x.y.z-macOS-arm64.zip` from
    [Releases](https://github.com/mahmudcoding/net-conditioner/releases).
 2. Unzip and drag `Net Conditioner.app` into Applications.
-3. On first launch: right-click → Open (the app is ad-hoc signed, so macOS
-   asks once).
+3. macOS blocks the first launch (the app is ad-hoc signed, without a paid
+   Apple certificate): open System Settings → Privacy & Security, click
+   "Open Anyway" near the bottom, and confirm. Quick alternative — clear
+   the quarantine in the terminal:
+   `xattr -dr com.apple.quarantine "/Applications/Net Conditioner.app"`.
 4. A speedometer appears in the menu bar.
 
 Requirements: macOS 13+, Apple Silicon. The app updates itself (Sparkle):
@@ -37,7 +40,7 @@ The administrator password is asked exactly once — on the very first
 change. That same step installs the narrow rule
 `/etc/sudoers.d/netcond-tools` (covering only `dnctl` and `pfctl`), and
 every later switch is instant and silent. To bring the prompts back:
-`sudo rm /etc/sudoers.d/netcond-tools`.
+`sudo rm /etc/sudoers.d/netcond-*`.
 
 The menu speeds are round tiers that cap the internet in both directions at
 once: **100 kbit/s · 250 kbit/s · 500 kbit/s · 1 Mbit/s · 2 Mbit/s ·

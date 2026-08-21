@@ -109,5 +109,11 @@ func runAdminShell(_ command: String) throws {
     }
 }
 
-let sudoersRulePath = "/etc/sudoers.d/netcond-tools"
+/// One rule file per user, so admins on a shared Mac don't overwrite each
+/// other's grants. sudoers.d silently skips files containing dots, hence the
+/// sanitizing.
+let sudoersRulePath: String = {
+    let safe = String(NSUserName().map { $0.isLetter || $0.isNumber ? $0 : "-" })
+    return "/etc/sudoers.d/netcond-" + safe
+}()
 
