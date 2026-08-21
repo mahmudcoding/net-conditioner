@@ -38,7 +38,7 @@ asymmetric limits are available from the terminal (`netcond set`).
 
 The administrator password is asked exactly once — on the very first
 change. That same step installs the narrow rule
-`/etc/sudoers.d/netcond-tools` (covering only `dnctl` and `pfctl`), and
+`/etc/sudoers.d/netcond-<username>` (covering only `dnctl` and `pfctl`), and
 every later switch is instant and silent. To bring the prompts back:
 `sudo rm /etc/sudoers.d/netcond-*`.
 
