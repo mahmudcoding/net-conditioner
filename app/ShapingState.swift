@@ -165,13 +165,8 @@ final class ShapingModel: ObservableObject {
         let loss = Double(values["LOSS_PCT"] ?? "") ?? 0
         lines.append("Packet loss: " + (loss < 0.05 ? "none" : "\(ShapingState.percent(loss.rounded()))%"))
 
-        lines.append("")
-        switch values["VERDICT"] {
-        case "baseline":
-            lines.append("Shaping is off — this is your normal connection.")
-        case "ok":
-            lines.append("Shaping is working as configured.")
-        default:
+        if values["VERDICT"] == "warn" {
+            lines.append("")
             lines.append("Shaping may not be working: \(values["WARNINGS"] ?? "measurements don't match the configured shape").")
         }
         return lines.joined(separator: "\n")
