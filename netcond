@@ -1,0 +1,608 @@
+#!/bin/bash
+# netcond — macOS network conditioner.
+#
+# Caps bandwidth, adds latency, and injects packet loss system-wide (or scoped
+# to chosen hosts) using dummynet pipes (dnctl) attached through a pf anchor.
+#
+# Privileged calls go through sudo when run as a normal user; the menu-bar app
+# runs the whole script as root instead. Nothing here edits /etc/pf.conf on
+# disk, and teardown removes only netcond's own pipes, rules, and pf enable
+# reference. Everything is in-memory kernel state: a reboot fully resets it.
+set -euo pipefail
+
+ANCHOR="netcond"
+TABLE="netcond_targets"
+PIPE_IN=9101    # download
+PIPE_OUT=9102   # upload
+PFCTL="/sbin/pfctl"
+DNCTL="/usr/sbin/dnctl"
+PF_CONF="/etc/pf.conf"
+DEFAULT_PROBES=100
+DEFAULT_PING_TARGET="1.1.1.1"
+
+SUDO="sudo"
+[ "$(id -u)" = "0" ] && SUDO=""
+
+DRY_RUN=0
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'netcond: %s\n' "$*" >&2; }
+die() { printf 'netcond: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+netcond — macOS network conditioner (bandwidth, latency, packet loss)
+
+Usage:
+  netcond preset <name> [--host <host>]... [--dry-run]
+  netcond set [--down <rate>] [--up <rate>] [--rtt <ms>] [--loss <pct>]
+              [--loss-up <pct>] [--loss-down <pct>] [--host <host>]... [--dry-run]
+  netcond status [--porcelain]
+  netcond off [--dry-run]
+  netcond verify [--target <host>] [--download-url <url>] [--probes <n>]
+
+Presets:
+  edge      240 kbit down / 200 kbit up / 400 ms RTT
+  3g        780 kbit down / 330 kbit up / 100 ms RTT
+  lte        50 mbit down /  10 mbit up /  50 ms RTT
+  dsl         2 mbit down / 256 kbit up /   5 ms RTT
+  very-bad    1 mbit down /   1 mbit up / 500 ms RTT / 10% loss both ways
+  loss-8      8% upload packet loss, no speed cap
+  loss-15    15% upload packet loss, no speed cap
+  blackout  100% packet loss both ways (full outage)
+
+Rates are <number><unit> with unit bit|kbit|mbit|gbit (e.g. 500kbit, 2mbit,
+1.5mbit); leaving --down/--up out means unlimited. --rtt is the total round
+trip added, split across both directions. --loss applies both ways unless
+--loss-up/--loss-down override a direction. --host limits shaping to traffic
+to/from those hosts (default: the whole machine; loopback is never shaped).
+Applying over an active shape replaces it. "netcond off" or a reboot restores
+normal networking. All commands except verify need administrator rights.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# state file — shared between CLI and the menu-bar app
+
+console_user() { stat -f%Su /dev/console 2>/dev/null || id -un; }
+
+state_dir() {
+  local user home
+  if [ "$(id -u)" = "0" ]; then
+    user=$(console_user)
+    home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
+    [ -n "$home" ] || home="/Users/$user"
+  else
+    home="$HOME"
+  fi
+  printf '%s/.netcond' "$home"
+}
+STATE_DIR="$(state_dir)"
+STATE_FILE="$STATE_DIR/state"
+
+state_get() {
+  [ -f "$STATE_FILE" ] || return 0
+  awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$STATE_FILE"
+}
+
+write_state() { # ACTIVE value; shaping globals must be set when active
+  [ "$DRY_RUN" = 1 ] && return 0
+  mkdir -p "$STATE_DIR"
+  local tmp="$STATE_FILE.tmp"
+  {
+    say "ACTIVE=$1"
+    say "PRESET=${PRESET:-}"
+    say "DOWN_BPS=${DOWN_BPS:-0}"
+    say "UP_BPS=${UP_BPS:-0}"
+    say "RTT_MS=${RTT:-0}"
+    say "LOSS_UP_PCT=${LOSS_UP_EFF:-0}"
+    say "LOSS_DOWN_PCT=${LOSS_DOWN_EFF:-0}"
+    say "HOSTS=${HOSTS:-}"
+    say "SCOPE_IPS=${SCOPE_IPS_CSV:-}"
+    say "TOKEN=${TOKEN:-}"
+    say "APPLIED_AT=${APPLIED_AT:-}"
+  } > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$STATE_FILE"
+  if [ "$(id -u)" = "0" ]; then
+    chown -R "$(console_user)" "$STATE_DIR" 2>/dev/null || true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# privileged execution (sudo as user, direct as root, printed under --dry-run)
+
+run_priv() {
+  if [ "$DRY_RUN" = 1 ]; then say "would run: ${SUDO:+$SUDO }$*"; return 0; fi
+  $SUDO "$@"
+}
+
+run_priv_ok() { # failure tolerated (missing pipe/anchor is fine)
+  if [ "$DRY_RUN" = 1 ]; then say "would run: ${SUDO:+$SUDO }$* (failure tolerated)"; return 0; fi
+  $SUDO "$@" 2>/dev/null || true
+}
+
+run_priv_stdin() { # ruleset payload on stdin
+  local payload
+  payload=$(cat)
+  if [ "$DRY_RUN" = 1 ]; then
+    say "would run: ${SUDO:+$SUDO }$* <<'RULES'"
+    say "$payload"
+    say "RULES"
+    return 0
+  fi
+  printf '%s\n' "$payload" | $SUDO "$@"
+}
+
+# ---------------------------------------------------------------------------
+# parsing and math
+
+parse_rate() { # "240kbit" -> integer bit/s; "" -> 0 (unlimited)
+  local raw=$1
+  if [ -z "$raw" ]; then printf '0'; return 0; fi
+  if [[ ! $raw =~ ^([0-9]+(\.[0-9]+)?)(bit|kbit|mbit|gbit)$ ]]; then
+    die "invalid rate '$raw' — use e.g. 500kbit, 2mbit, 1.5mbit"
+  fi
+  awk -v n="${BASH_REMATCH[1]}" -v u="${BASH_REMATCH[3]}" 'BEGIN {
+    if (u == "bit") m = 1
+    else if (u == "kbit") m = 1000
+    else if (u == "mbit") m = 1000000
+    else m = 1000000000
+    printf "%d", n * m
+  }'
+}
+
+parse_loss() { # percent 0..100, fractional allowed
+  local raw=$1
+  [[ $raw =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "invalid loss '$raw' — percent 0..100"
+  awk -v p="$raw" 'BEGIN { exit !(p >= 0 && p <= 100) }' \
+    || die "loss '$raw' out of range 0..100"
+  printf '%s' "$raw"
+}
+
+plr_of() { awk -v p="$1" 'BEGIN { printf "%.5f", p / 100 }'; }
+
+is_zero() { awk -v v="$1" 'BEGIN { exit !(v == 0) }'; }
+
+queue_slots() { # bw_bps delay_ms -> slots sized to the bandwidth-delay product
+  awk -v bw="$1" -v d="$2" 'BEGIN {
+    s = int(bw * (d / 1000) / 12000) + 50
+    if (s < 50) s = 50
+    if (s > 500) s = 500
+    printf "%d", s
+  }'
+}
+
+fmt_rate() { # bit/s -> human
+  awk -v b="$1" 'BEGIN {
+    if (b == 0) { printf "unlimited"; exit }
+    if (b >= 1000000) printf "%.4g mbit", b / 1000000
+    else if (b >= 1000) printf "%.4g kbit", b / 1000
+    else printf "%d bit", b
+  }'
+}
+
+# ---------------------------------------------------------------------------
+# rulesets
+
+resolve_hosts() { # host args -> sorted unique IPs, one per line
+  local host records
+  for host in "$@"; do
+    if [[ $host =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ $host == *:* ]]; then
+      printf '%s\n' "$host"
+      continue
+    fi
+    records=$( { dig +short +time=3 +tries=2 A "$host" 2>/dev/null
+                 dig +short +time=3 +tries=2 AAAA "$host" 2>/dev/null; } \
+      | grep -E '^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|[0-9a-fA-F:]*:[0-9a-fA-F:.]+)$' || true)
+    [ -n "$records" ] || die "could not resolve host '$host'"
+    printf '%s\n' "$records"
+  done | sort -u
+}
+
+compose_anchor_rules() { # uses SCOPE_IPS_CSV
+  if [ -n "${SCOPE_IPS_CSV:-}" ]; then
+    say "table <$TABLE> persist { ${SCOPE_IPS_CSV//,/, } }"
+    say "dummynet in quick on ! lo0 from <$TABLE> to any pipe $PIPE_IN"
+    say "dummynet out quick on ! lo0 from any to <$TABLE> pipe $PIPE_OUT"
+  else
+    say "dummynet in quick on ! lo0 from any to any pipe $PIPE_IN"
+    say "dummynet out quick on ! lo0 from any to any pipe $PIPE_OUT"
+  fi
+}
+
+compose_main_ruleset() { # stock pf.conf + our anchor hooks, loaded from stdin
+  cat "$PF_CONF"
+  say "dummynet-anchor \"$ANCHOR\""
+  say "anchor \"$ANCHOR\""
+}
+
+# ---------------------------------------------------------------------------
+# live probes (root required)
+
+pf_enabled() { $SUDO "$PFCTL" -s info 2>/dev/null | head -1 | grep -q Enabled; }
+
+anchor_attached() { $SUDO "$PFCTL" -sr 2>/dev/null | grep -q "anchor \"$ANCHOR\""; }
+
+live_pipes() { # our pipe numbers present in dnctl list
+  $SUDO "$DNCTL" list 2>/dev/null | awk -v a="$PIPE_IN" -v b="$PIPE_OUT" '
+    /^[0-9]+:/ { n = $1 + 0; if (n == a || n == b) print n }'
+}
+
+foreign_pipes() {
+  $SUDO "$DNCTL" list 2>/dev/null | awk -v a="$PIPE_IN" -v b="$PIPE_OUT" '
+    /^[0-9]+:/ { n = $1 + 0; if (n != a && n != b) print n }'
+}
+
+# ---------------------------------------------------------------------------
+# apply
+
+cmd_apply() {
+  DOWN_BPS=$(parse_rate "$DOWN_RATE")
+  UP_BPS=$(parse_rate "$UP_RATE")
+  [[ $RTT =~ ^[0-9]+$ ]] || die "invalid --rtt '$RTT' — whole milliseconds"
+  LOSS_UP_EFF=$(parse_loss "${LOSS_UP:-${LOSS:-0}}")
+  LOSS_DOWN_EFF=$(parse_loss "${LOSS_DOWN:-${LOSS:-0}}")
+
+  if [ "$DOWN_BPS" = 0 ] && [ "$UP_BPS" = 0 ] && [ "$RTT" = 0 ] \
+    && is_zero "$LOSS_UP_EFF" && is_zero "$LOSS_DOWN_EFF"; then
+    die "nothing to shape — pass at least one of --down/--up/--rtt/--loss (see --help)"
+  fi
+
+  local delay_in=$((RTT / 2))
+  local delay_out=$((RTT - delay_in))
+  local plr_in plr_out
+  plr_in=$(plr_of "$LOSS_DOWN_EFF")
+  plr_out=$(plr_of "$LOSS_UP_EFF")
+
+  SCOPE_IPS_CSV=""
+  if [ -n "$HOSTS" ]; then
+    # shellcheck disable=SC2086
+    SCOPE_IPS_CSV=$(resolve_hosts $HOSTS | paste -sd, -)
+  fi
+
+  local in_args out_args
+  in_args=(pipe "$PIPE_IN" config bw "${DOWN_BPS}bit/s" delay "$delay_in" plr "$plr_in")
+  [ "$DOWN_BPS" != 0 ] && in_args=("${in_args[@]}" queue "$(queue_slots "$DOWN_BPS" "$delay_in")")
+  out_args=(pipe "$PIPE_OUT" config bw "${UP_BPS}bit/s" delay "$delay_out" plr "$plr_out")
+  [ "$UP_BPS" != 0 ] && out_args=("${out_args[@]}" queue "$(queue_slots "$UP_BPS" "$delay_out")")
+
+  run_priv "$DNCTL" "${in_args[@]}"
+  run_priv "$DNCTL" "${out_args[@]}"
+
+  local attached=0
+  if [ "$DRY_RUN" = 0 ] && anchor_attached; then attached=1; fi
+  if [ "$attached" = 0 ]; then
+    compose_main_ruleset | run_priv_stdin "$PFCTL" -q -f -
+  fi
+
+  run_priv_ok "$PFCTL" -q -a "$ANCHOR" -F all
+  compose_anchor_rules | run_priv_stdin "$PFCTL" -q -a "$ANCHOR" -f -
+
+  TOKEN=""
+  if [ "$DRY_RUN" = 1 ]; then
+    run_priv "$PFCTL" -E
+  else
+    local prev_token
+    prev_token=$(state_get TOKEN)
+    if [ -n "$prev_token" ] && [ "$(state_get ACTIVE)" = "1" ] && pf_enabled; then
+      TOKEN=$prev_token
+    else
+      TOKEN=$($SUDO "$PFCTL" -E 2>&1 | awk '/Token/ { print $3; exit }') || true
+      if [ -z "$TOKEN" ]; then
+        warn "pf enabled, but no reference token was captured (it cannot be released later; a reboot clears it)"
+      fi
+    fi
+  fi
+
+  APPLIED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  write_state 1
+
+  local scope_note=""
+  [ -n "$SCOPE_IPS_CSV" ] && scope_note=" (scoped to: ${HOSTS})"
+  if [ "$DRY_RUN" = 1 ]; then
+    say "dry run — nothing was changed"
+  else
+    say "shaping on${scope_note}: $(fmt_rate "$DOWN_BPS") down / $(fmt_rate "$UP_BPS") up / +${RTT} ms RTT / loss ${LOSS_UP_EFF}% up, ${LOSS_DOWN_EFF}% down"
+    say "restore normal networking with: netcond off"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# off
+
+cmd_off() {
+  TOKEN=$(state_get TOKEN)
+
+  local attached=1
+  if [ "$DRY_RUN" = 0 ]; then
+    if anchor_attached; then attached=1; else attached=0; fi
+  fi
+
+  run_priv_ok "$PFCTL" -q -a "$ANCHOR" -F all
+  if [ "$attached" = 1 ]; then
+    run_priv "$PFCTL" -q -f "$PF_CONF"
+  fi
+  run_priv_ok "$DNCTL" pipe delete "$PIPE_IN"
+  run_priv_ok "$DNCTL" pipe delete "$PIPE_OUT"
+
+  if [ -n "$TOKEN" ]; then
+    run_priv_ok "$PFCTL" -X "$TOKEN"
+  else
+    say "note: no pf reference token on record — skipping release (harmless; a reboot clears it)"
+  fi
+
+  PRESET="" DOWN_BPS=0 UP_BPS=0 RTT=0 LOSS_UP_EFF=0 LOSS_DOWN_EFF=0
+  HOSTS="" SCOPE_IPS_CSV="" TOKEN="" APPLIED_AT=""
+  write_state 0
+  if [ "$DRY_RUN" = 1 ]; then
+    say "dry run — nothing was changed"
+  else
+    say "shaping off — normal networking restored"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# status
+
+cmd_status() {
+  if [ "$PORCELAIN" = 1 ]; then
+    if [ -f "$STATE_FILE" ]; then cat "$STATE_FILE"; else say "ACTIVE=0"; fi
+    return 0
+  fi
+
+  local active preset
+  active=$(state_get ACTIVE)
+  [ -n "$active" ] || active=0
+  preset=$(state_get PRESET)
+
+  say "netcond status (live checks need administrator rights)"
+  if [ "$active" = "1" ]; then
+    say "  state: ACTIVE${preset:+ (preset: $preset)} since $(state_get APPLIED_AT)"
+    say "  shape: $(fmt_rate "$(state_get DOWN_BPS)") down / $(fmt_rate "$(state_get UP_BPS)") up / +$(state_get RTT_MS) ms RTT / loss $(state_get LOSS_UP_PCT)% up, $(state_get LOSS_DOWN_PCT)% down"
+    [ -n "$(state_get HOSTS)" ] && say "  scope: $(state_get HOSTS) [$(state_get SCOPE_IPS)]"
+  else
+    say "  state: off"
+  fi
+
+  local pf_line anchor_rules pipes foreign divergence=""
+  pf_line=$($SUDO "$PFCTL" -s info 2>/dev/null | head -1 || true)
+  say "  pf: ${pf_line:-unreadable}"
+
+  anchor_rules=$($SUDO "$PFCTL" -a "$ANCHOR" -s rules 2>/dev/null || true)
+  if [ -n "$anchor_rules" ]; then
+    say "  anchor \"$ANCHOR\": $(printf '%s\n' "$anchor_rules" | grep -c dummynet) dummynet rule(s)"
+  else
+    say "  anchor \"$ANCHOR\": absent"
+  fi
+
+  pipes=$(live_pipes || true)
+  if [ -n "$pipes" ]; then
+    say "  pipes: $(printf '%s\n' "$pipes" | paste -sd' ' -)"
+  else
+    say "  pipes: none of ours"
+  fi
+
+  foreign=$(foreign_pipes || true)
+  if [ -n "$foreign" ]; then
+    say "  warning: foreign dummynet pipes present ($(printf '%s\n' "$foreign" | paste -sd' ' -)) — is Network Link Conditioner or another shaper running?"
+  fi
+
+  if [ "$active" = "1" ]; then
+    [ -z "$pipes" ] && divergence="state says active but our pipes are missing"
+    [ -z "$anchor_rules" ] && divergence="${divergence:+$divergence; }state says active but the anchor has no rules"
+  else
+    [ -n "$pipes" ] && divergence="state says off but our pipes exist"
+    [ -n "$anchor_rules" ] && divergence="${divergence:+$divergence; }state says off but the anchor has rules"
+  fi
+
+  if [ -n "$divergence" ]; then
+    say "status: DIVERGED — $divergence (run: netcond off)"
+    return 1
+  fi
+  say "status: OK"
+}
+
+# ---------------------------------------------------------------------------
+# verify — no administrator rights needed
+
+ping_summary() { # target probes -> "loss_pct avg_rtt_ms" (avg empty at 100% loss)
+  local target=$1 probes=$2 out
+  out=$(ping -q -c "$probes" -i 0.2 "$target" 2>&1) || true
+  if ! printf '%s' "$out" | grep -q 'packets transmitted'; then
+    out=$(ping -q -c "$probes" "$target" 2>&1) || true
+  fi
+  local loss avg
+  loss=$(printf '%s\n' "$out" | sed -nE 's/.* ([0-9.]+)% packet loss.*/\1/p' | head -1)
+  avg=$(printf '%s\n' "$out" | awk -F' = ' '/round-trip/ { split($2, a, "/"); print a[2]; exit }')
+  printf '%s %s' "${loss:-100}" "${avg:-}"
+}
+
+cmd_verify() {
+  local active down_bps rtt_ms loss_up loss_down hosts
+  active=$(state_get ACTIVE); [ -n "$active" ] || active=0
+  down_bps=$(state_get DOWN_BPS); [ -n "$down_bps" ] || down_bps=0
+  rtt_ms=$(state_get RTT_MS); [ -n "$rtt_ms" ] || rtt_ms=0
+  loss_up=$(state_get LOSS_UP_PCT); [ -n "$loss_up" ] || loss_up=0
+  loss_down=$(state_get LOSS_DOWN_PCT); [ -n "$loss_down" ] || loss_down=0
+  hosts=$(state_get HOSTS)
+
+  local target=$VERIFY_TARGET
+  if [ -z "$target" ]; then
+    if [ "$active" = "1" ] && [ -n "$hosts" ]; then
+      target=$(printf '%s' "$hosts" | awk '{ print $1 }')
+    else
+      target=$DEFAULT_PING_TARGET
+    fi
+  fi
+
+  local warns=""
+  add_warn() { warns="${warns:+$warns; }$1"; }
+
+  say "verify: pinging $target ($PROBES probes)..."
+  local summary loss avg
+  summary=$(ping_summary "$target" "$PROBES")
+  loss=${summary%% *}
+  avg=${summary#* }
+  say "  measured: loss ${loss}%${avg:+, avg RTT ${avg} ms}"
+
+  if [ "$active" = "1" ]; then
+    local expected_loss
+    expected_loss=$(awk -v u="$loss_up" -v d="$loss_down" 'BEGIN {
+      printf "%.1f", (1 - (1 - u / 100) * (1 - d / 100)) * 100 }')
+    say "  expected: round-trip loss ~${expected_loss}%, added RTT ${rtt_ms} ms"
+    awk -v m="$loss" -v e="$expected_loss" 'BEGIN {
+      exit !(m < e / 2 - 1 || m > e * 2 + 5) }' \
+      && add_warn "measured loss ${loss}% is far from the configured ~${expected_loss}%"
+    if [ -n "$avg" ] && [ "$rtt_ms" != 0 ]; then
+      awk -v m="$avg" -v c="$rtt_ms" 'BEGIN { exit !(m < c) }' \
+        && add_warn "measured RTT ${avg} ms is below the ${rtt_ms} ms that shaping should add"
+    fi
+  fi
+
+  local url=$DOWNLOAD_URL
+  if [ -z "$url" ]; then
+    if [ "$active" = "1" ] && [ -n "$hosts" ]; then
+      say "  download check skipped: shaping is scoped to '$hosts' — pass --download-url with a URL on a scoped host to measure it"
+      url=""
+    else
+      local bytes
+      bytes=$(awk -v bw="$down_bps" 'BEGIN {
+        b = (bw > 0) ? bw : 10485760
+        if (b < 262144) b = 262144
+        if (b > 26214400) b = 26214400
+        printf "%d", b }')
+      url="https://speed.cloudflare.com/__down?bytes=$bytes"
+    fi
+  fi
+
+  if [ -n "$url" ]; then
+    say "verify: downloading $url ..."
+    local metrics speed_bps http_code
+    metrics=$(curl -sS -o /dev/null --max-time 60 -w '%{speed_download} %{http_code}' "$url" 2>/dev/null) || true
+    speed_bps=$(awk -v s="${metrics%% *}" 'BEGIN { printf "%d", s * 8 }')
+    http_code=${metrics##* }
+    if [ "${http_code:-000}" = "200" ]; then
+      say "  measured: $(fmt_rate "$speed_bps")/s download"
+      if [ "$active" = "1" ] && [ "$down_bps" != 0 ]; then
+        say "  expected: capped at $(fmt_rate "$down_bps")/s"
+        awk -v m="$speed_bps" -v c="$down_bps" 'BEGIN { exit !(m > c * 1.6) }' \
+          && add_warn "download ran at $(fmt_rate "$speed_bps")/s despite the $(fmt_rate "$down_bps")/s cap — shaping may not be taking effect"
+      fi
+    else
+      say "  download did not complete (HTTP ${http_code:-none})"
+      if [ "$active" = "1" ] && is_zero "$loss_up" && is_zero "$loss_down"; then
+        add_warn "download failed with no packet loss configured — check connectivity"
+      fi
+    fi
+  fi
+
+  if [ -n "$warns" ]; then
+    say "verify: WARN — $warns"
+    return 1
+  fi
+  if [ "$active" = "1" ]; then say "verify: OK — shaping is taking effect"; else say "verify: baseline (shaping off)"; fi
+}
+
+# ---------------------------------------------------------------------------
+# argument parsing
+
+[ $# -ge 1 ] || { usage >&2; exit 1; }
+COMMAND=$1
+shift
+
+DOWN_RATE="" UP_RATE="" RTT=0 LOSS="" LOSS_UP="" LOSS_DOWN="" HOSTS="" PRESET=""
+PORCELAIN=0 VERIFY_TARGET="" DOWNLOAD_URL="" PROBES=$DEFAULT_PROBES
+
+need_value() {
+  [ $# -ge 2 ] && [ -n "$2" ] || die "$1 requires a value"
+  case $2 in --*) die "$1 requires a value" ;; esac
+}
+
+apply_preset() {
+  PRESET=$1
+  case $1 in
+    edge)     DOWN_RATE=240kbit UP_RATE=200kbit RTT=400 ;;
+    3g)       DOWN_RATE=780kbit UP_RATE=330kbit RTT=100 ;;
+    lte)      DOWN_RATE=50mbit  UP_RATE=10mbit  RTT=50 ;;
+    dsl)      DOWN_RATE=2mbit   UP_RATE=256kbit RTT=5 ;;
+    very-bad) DOWN_RATE=1mbit   UP_RATE=1mbit   RTT=500 LOSS=10 ;;
+    loss-8)   LOSS_UP=8 ;;
+    loss-15)  LOSS_UP=15 ;;
+    blackout) LOSS=100 ;;
+    *) die "unknown preset '$1' — one of: edge, 3g, lte, dsl, very-bad, loss-8, loss-15, blackout" ;;
+  esac
+}
+
+case $COMMAND in
+  preset)
+    [ $# -ge 1 ] || die "preset requires a name (see --help)"
+    apply_preset "$1"
+    shift
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --host) need_value "$1" "${2:-}"; HOSTS="${HOSTS:+$HOSTS }$2"; shift 2 ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
+    cmd_apply
+    ;;
+  set)
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --down) need_value "$1" "${2:-}"; DOWN_RATE=$2; shift 2 ;;
+        --up) need_value "$1" "${2:-}"; UP_RATE=$2; shift 2 ;;
+        --rtt) need_value "$1" "${2:-}"; RTT=$2; shift 2 ;;
+        --loss) need_value "$1" "${2:-}"; LOSS=$2; shift 2 ;;
+        --loss-up) need_value "$1" "${2:-}"; LOSS_UP=$2; shift 2 ;;
+        --loss-down) need_value "$1" "${2:-}"; LOSS_DOWN=$2; shift 2 ;;
+        --host) need_value "$1" "${2:-}"; HOSTS="${HOSTS:+$HOSTS }$2"; shift 2 ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
+    cmd_apply
+    ;;
+  status)
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --porcelain) PORCELAIN=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
+    cmd_status
+    ;;
+  off)
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --dry-run) DRY_RUN=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
+    cmd_off
+    ;;
+  verify)
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --target) need_value "$1" "${2:-}"; VERIFY_TARGET=$2; shift 2 ;;
+        --download-url) need_value "$1" "${2:-}"; DOWNLOAD_URL=$2; shift 2 ;;
+        --probes) need_value "$1" "${2:-}"; PROBES=$2; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
+    [[ $PROBES =~ ^[0-9]+$ ]] && [ "$PROBES" -ge 5 ] || die "--probes must be a number of at least 5"
+    cmd_verify
+    ;;
+  --help|-h|help)
+    usage
+    ;;
+  *)
+    die "unknown command '$COMMAND' — one of: preset, set, status, off, verify (see --help)"
+    ;;
+esac

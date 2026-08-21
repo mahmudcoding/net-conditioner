@@ -1,0 +1,15 @@
+{
+  "name": "net-conditioner",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "macOS menu-bar network conditioner — bandwidth caps, latency, and packet loss via dummynet/pf",
+  "scripts": {
+    "build:app": "node scripts/build-macos-app.mjs",
+    "release:mac": "node scripts/release-macos.mjs",
+    "test:engine": "node scripts/test-engine.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
