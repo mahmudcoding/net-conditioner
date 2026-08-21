@@ -131,7 +131,7 @@ final class ShapingModel: ObservableObject {
     }
 
     /// Turns the engine's KEY=VALUE verify report into a few plain lines.
-    static func verifySummary(_ porcelain: String) -> String {
+    nonisolated static func verifySummary(_ porcelain: String) -> String {
         var values: [String: String] = [:]
         for line in porcelain.split(separator: "\n") {
             guard let separator = line.firstIndex(of: "=") else { continue }
@@ -177,7 +177,7 @@ final class ShapingModel: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
-    static func speedText(_ bps: Int) -> String {
+    nonisolated static func speedText(_ bps: Int) -> String {
         if bps >= 10_000_000 { return "\(Int((Double(bps) / 1_000_000).rounded())) Mbit/s" }
         if bps >= 1_000_000 { return String(format: "%.1f Mbit/s", Double(bps) / 1_000_000) }
         return "\(Int((Double(bps) / 1_000).rounded())) kbit/s"
