@@ -203,7 +203,11 @@ final class ShapingModel: ObservableObject {
         loopUpdates = 0
         lastTickBytes = 0
         lastTickTime = Date()
-        for _ in 0..<3 { counter.makeTask?().resume() }
+        // Parallel streams saturate an open line, but through a shaped pipe's
+        // small queue they fight each other into collapse — one steady stream
+        // tracks a cap much better.
+        let streams = state.active ? 1 : 3
+        for _ in 0..<streams { counter.makeTask?().resume() }
         let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.bandwidthTick() }
         }
@@ -220,9 +224,11 @@ final class ShapingModel: ObservableObject {
         lastTickBytes = bytes
         lastTickTime = now
         loopTicks += 1
-        // Header-sized dribbles are not a measurement: error bodies and
-        // stalled streams must never register as a (tiny) speed.
-        if delta >= 10_000, elapsed > 0 {
+        // Any received payload is an honest measurement (error bodies are
+        // cancelled before they reach the byte counter). Under a heavy cap
+        // TCP can sag well below it between recoveries — show that truth
+        // rather than freezing on the last big number.
+        if delta > 0, elapsed > 0 {
             loopUpdates += 1
             preferredSourceIndex = loopSourceIndex
             let bps = Int(Double(delta) * 8 / elapsed)
